@@ -111,6 +111,32 @@ async function spectrogramMax(page) {
   })
 }
 
+/** 读取滚动条滑块占整条的比例（= 视口占全天时长的比例）。 */
+async function scrollbarViewportFraction(page) {
+  return page.evaluate(() => {
+    const viewport = document.querySelector('.scrollbar .viewport')
+    const track = document.querySelector('.scrollbar')
+    if (!viewport || !track) return -1
+    return viewport.getBoundingClientRect().width / track.getBoundingClientRect().width
+  })
+}
+
+/** 在滚动条上滚轮缩放。 */
+async function wheelOnScrollbar(page, deltaY) {
+  await page.evaluate((delta) => {
+    const track = document.querySelector('.scrollbar')
+    const rect = track.getBoundingClientRect()
+    track.dispatchEvent(
+      new WheelEvent('wheel', {
+        deltaY: delta,
+        clientX: rect.left + rect.width / 2,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+  }, deltaY)
+}
+
 /** 等待结果画廊出现恰好 n 张且图片已加载。 */
 async function waitForResults(page, expected, timeout = 180_000) {
   await page.waitForFunction(
@@ -194,6 +220,13 @@ try {
   const maxIntensity = await spectrogramMax(page)
   console.log('频谱图最大强度：', maxIntensity)
   check(maxIntensity > 120, '频谱图渲染出高亮内容')
+
+  // --- 滚动条滚轮缩放 ---
+  const beforeZoom = await scrollbarViewportFraction(page)
+  await wheelOnScrollbar(page, -120)
+  const afterZoom = await scrollbarViewportFraction(page)
+  console.log('滚动条视口占比：', beforeZoom.toFixed(3), '→', afterZoom.toFixed(3))
+  check(afterZoom < beforeZoom - 0.01, '在滚动条上滚轮可缩放')
 
   // --- 音频播放（播放头推进）---
   await clickButtonByText(page, '▶ 播放')

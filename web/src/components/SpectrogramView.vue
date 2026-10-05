@@ -427,28 +427,42 @@ function updateCursor(x: number): void {
   }
 }
 
+/** 以 `center`（秒）为锚点缩放视口。 */
+function zoomAround(center: number, factor: number): void {
+  const duration = totalDuration.value
+  const oldSpan = view.value.t1 - view.value.t0
+  const span = clamp(oldSpan * factor, duration / 500, duration)
+  const t0 = center - (center - view.value.t0) * (span / oldSpan)
+  setView(t0, t0 + span)
+}
+
 function onWheel(e: WheelEvent): void {
   if (!props.spectrogram) return
   e.preventDefault()
-  const x = localX(e)
   if (e.shiftKey) {
     const dt = ((e.deltaY || e.deltaX) / plotWidth()) * (view.value.t1 - view.value.t0)
     setView(view.value.t0 + dt, view.value.t1 + dt)
     return
   }
-  const t = clamp(pxToTime(x), 0, totalDuration.value)
-  const factor = e.deltaY > 0 ? 1.25 : 1 / 1.25
-  const oldSpan = view.value.t1 - view.value.t0
-  const span = clamp(oldSpan * factor, totalDuration.value / 500, totalDuration.value)
-  const t0 = t - (t - view.value.t0) * (span / oldSpan)
-  setView(t0, t0 + span)
+  zoomAround(clamp(pxToTime(localX(e)), 0, totalDuration.value), e.deltaY > 0 ? 1.25 : 1 / 1.25)
+}
+
+/** 在滚动条上滚动滚轮同样缩放（以光标对应时刻为锚点）。 */
+function onScrollbarWheel(e: WheelEvent): void {
+  if (!props.spectrogram) return
+  e.preventDefault()
+  const duration = totalDuration.value
+  const time = scrollFraction(e.clientX) * duration
+  if (e.shiftKey) {
+    const dt = ((e.deltaY || e.deltaX) / 120) * duration * 0.05
+    setView(view.value.t0 + dt, view.value.t1 + dt)
+    return
+  }
+  zoomAround(time, e.deltaY > 0 ? 1.25 : 1 / 1.25)
 }
 
 function zoomBy(factor: number): void {
-  const center = (view.value.t0 + view.value.t1) / 2
-  const span = view.value.t1 - view.value.t0
-  const next = clamp(span * factor, totalDuration.value / 500, totalDuration.value)
-  setView(center - next / 2, center + next / 2)
+  zoomAround((view.value.t0 + view.value.t1) / 2, factor)
 }
 
 // --- 横向滚动条 ---------------------------------------------------------
@@ -585,7 +599,7 @@ watch(
       <button type="button" :disabled="!spectrogram" @click="zoomBy(1 / 1.5)">放大</button>
       <button type="button" :disabled="!spectrogram" @click="zoomBy(1.5)">缩小</button>
       <span class="selection">{{ interaction === 'playhead' ? '' : '选区' }} {{ selectionText }}</span>
-      <span class="hint">滚轮缩放 · Shift+滚轮平移 · Alt/中键拖拽平移</span>
+      <span class="hint">滚轮缩放 · Shift+滚轮平移 · Alt/中键拖拽平移 · 下方滚动条可拖动/滚轮缩放</span>
     </div>
     <div
       ref="root"
@@ -604,11 +618,12 @@ watch(
     <div
       ref="scrollTrack"
       class="scrollbar"
-      title="拖动平移，拖两端缩放，点击跳转"
+      title="拖动平移，拖两端缩放，点击跳转，滚轮缩放"
       @pointerdown="onScrollPointerDown"
       @pointermove="onScrollPointerMove"
       @pointerup="onScrollPointerUp"
       @pointercancel="onScrollPointerUp"
+      @wheel="onScrollbarWheel"
     >
       <div class="viewport" :style="viewportStyle" />
     </div>
