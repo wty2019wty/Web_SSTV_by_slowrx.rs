@@ -157,7 +157,11 @@ try {
     () => [...document.querySelectorAll('select option')].some((o) => o.textContent.includes('自动识模')),
     { timeout: 60_000 },
   )
-  // 合成模式选 pd120，合成两张图。
+  // 合成模式选 pd120，合成两张图（展开开发测试区）。
+  await page.evaluate(() => {
+    const details = document.querySelector('details.devtools')
+    if (details) details.open = true
+  })
   await selectByOptionText(page, 'PD-120', 'pd120')
   await setSynthCount(page, 2)
   console.log('模式列表已加载')

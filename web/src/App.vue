@@ -315,34 +315,41 @@ onBeforeUnmount(() => {
     <section class="panel">
       <h2>1. 音频来源</h2>
       <div class="row">
-        <label>
-          合成模式
-          <select v-model="synthMode" :disabled="busy">
-            <option v-for="mode in modes" :key="mode.shortName" :value="mode.shortName">
-              {{ mode.name }}（{{ mode.width }}×{{ mode.height }}）
-            </option>
-          </select>
-        </label>
-        <label class="check">
-          <input v-model="synthWithVis" type="checkbox" :disabled="busy" />
-          包含 VIS 头
-        </label>
-        <label>
-          图片数
-          <input v-model.number="synthCount" type="number" min="1" max="20" :disabled="busy" />
-        </label>
-        <button :disabled="busy" @click="loadSynth">生成合成音频</button>
         <label class="file">
           选择音频文件
           <input type="file" accept="audio/*" :disabled="busy" @change="onFileChange" />
         </label>
+        <span class="hint">已载入 {{ durationText }}</span>
       </div>
-      <p class="hint">
-        <template v-if="synthModeInfo">
-          {{ synthModeInfo.name }} 标称图像时长约 {{ synthModeInfo.imageSeconds.toFixed(1) }} 秒 ·
-        </template>
-        已载入 {{ durationText }}
-      </p>
+      <details class="devtools">
+        <summary>开发测试：生成合成音频</summary>
+        <div class="row">
+          <label>
+            合成模式
+            <select v-model="synthMode" :disabled="busy">
+              <option v-for="mode in modes" :key="mode.shortName" :value="mode.shortName">
+                {{ mode.name }}（{{ mode.width }}×{{ mode.height }}）
+              </option>
+            </select>
+          </label>
+          <label class="check">
+            <input v-model="synthWithVis" type="checkbox" :disabled="busy" />
+            包含 VIS 头
+          </label>
+          <label>
+            图片数
+            <input v-model.number="synthCount" type="number" min="1" max="20" :disabled="busy" />
+          </label>
+          <button :disabled="busy" @click="loadSynth">生成合成音频</button>
+        </div>
+        <p class="hint">
+          用 slowrx 的合成编码器生成已知内容的 SSTV 音频，便于在没有真实录音时验证解码。
+          <template v-if="synthModeInfo">
+            {{ synthModeInfo.name }} 标称图像时长约 {{ synthModeInfo.imageSeconds.toFixed(1) }} 秒。
+          </template>
+          需要 dev-synth 构建（<code>npm run wasm</code>），生产构建下不可用。
+        </p>
+      </details>
     </section>
 
     <section class="panel">
@@ -489,6 +496,24 @@ button:disabled {
 .hint {
   color: #8b98a5;
   font-size: 0.85rem;
+}
+.devtools {
+  margin-top: 0.75rem;
+  border-top: 1px solid #2c3038;
+  padding-top: 0.5rem;
+}
+.devtools summary {
+  cursor: pointer;
+  color: #8b98a5;
+  font-size: 0.85rem;
+}
+.devtools[open] summary {
+  margin-bottom: 0.6rem;
+}
+.devtools code {
+  background: #2b3038;
+  border-radius: 4px;
+  padding: 0 0.25rem;
 }
 .progress {
   height: 6px;
