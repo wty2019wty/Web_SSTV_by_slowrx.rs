@@ -86,6 +86,8 @@ async function storeAndReport(
 ): Promise<void> {
   session = { sampleRate, audio }
   const spectrogram = computeSpectrogramInfo(sampleRate, audio)
+  // 回传一份 PCM 副本给主线程做播放（Worker 自己保留原始数组用于解码）。
+  const playback = audio.slice()
   post(
     {
       type: 'loaded',
@@ -94,8 +96,9 @@ async function storeAndReport(
       totalSamples: audio.length,
       duration: audio.length / sampleRate,
       spectrogram,
+      audio: playback,
     },
-    [spectrogram.data.buffer],
+    [spectrogram.data.buffer, playback.buffer],
   )
 }
 

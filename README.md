@@ -93,7 +93,8 @@ npm run e2e
   选区结束 `ending_at`），从锚点一直喂到文件末尾，由解码器按模式标称时长截取窗口
 - [x] **M5** 频谱图 + 时间选区：Worker 内用 wasm 的 rustfft 算 STFT，主线程双层 Canvas
   渲染，支持缩放/平移与选区创建/移动/两端缩放
-- [x] **M6** 结果 Canvas 渲染 + PNG 下载 + 状态/进度反馈（进度为估算，见设计要点）
+- [x] **M6** 结果 Canvas 渲染 + PNG 下载 + 状态/进度反馈（进度为估算，见设计要点）；
+  音频播放（整段 / 选区）、播放头同步、点击频谱图定位
 - [ ] **M7** V8 性能收尾（含 `wasm-opt` 体积优化、无头浏览器耗时复测）
 
 ## 设计要点
@@ -103,6 +104,9 @@ npm run e2e
 - 强制模式必须携带解码窗口；WS 自动识模与强制模式两条路径在 UI 上可切换。
 - wasm 目标依赖 `rustfft/wasm_simd` + `-C target-feature=+simd128`，实测有效。
 - 音频用 `postMessage` + transferable 传递，不引入 SharedArrayBuffer。
+- 播放：Worker 在载入完成后回传一份 PCM 副本，主线程用 Web Audio API
+  (`AudioBufferSourceNode`) 播放；播放头由 `AudioContext.currentTime` 驱动并绘制在
+  频谱图上，移出视口时自动跟随。
 - 会话模型：Worker 持有当前 PCM，频谱图与选区解码都引用它，避免重复搬运大数组。
 - 两条解码路径（方案 6.5）：
   - **自动识模**：只喂入选区切片 + 末尾静音，避免识别到选区外的 VIS；

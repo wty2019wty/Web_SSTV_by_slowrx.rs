@@ -32,6 +32,8 @@ const log = ref<string[]>([])
 const hasImage = ref(false)
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
+const playing = ref(false)
+const playhead = ref(0)
 
 const currentMode = computed(() => modes.value.find((m) => m.shortName === selectedMode.value))
 const durationText = computed(() =>
@@ -142,8 +144,11 @@ async function onFileChange(event: Event) {
 }
 
 function applyLoaded(info: LoadedInfo) {
+  finishPlayback()
+  sourceBuffer = null
   loaded.value = info
   selection.value = { start: 0, end: info.duration }
+  playhead.value = 0
   clearCanvas()
 }
 
@@ -201,6 +206,95 @@ function toMono(buffer: AudioBuffer): Float32Array {
   return out
 }
 
+// --- 音频播放 -----------------------------------------------------------
+// 用 Web Audio API 播放主线程持有的 PCM 副本；播放头随播放推进，
+// 并在频谱图上实时显示（点击频谱图可定位）。
+let audioContext: AudioContext | null = null
+let sourceNode: AudioBufferSourceNode | null = null
+let sourceBuffer: AudioBuffer | null = null
+let playbackOffset = 0
+let playbackStartCtxTime = 0
+let playbackLimit = Number.POSITIVE_INFINITY
+let animationHandle = 0
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
+}
+
+function finishPlayback(): void {
+  cancelAnimationFrame(animationHandle)
+  if (sourceNode) {
+    try {
+      sourceNode.stop()
+    } catch {
+      /* 可能已自然结束 */
+    }
+    sourceNode.disconnect()
+    sourceNode = null
+  }
+  playing.value = false
+}
+
+function startPlayback(from: number, limit: number): void {
+  const info = loaded.value
+  if (!info) return
+  finishPlayback()
+  audioContext ??= new AudioContext()
+  const ctx = audioContext
+  void ctx.resume()
+  if (!sourceBuffer || sourceBuffer.length !== info.audio.length) {
+    sourceBuffer = ctx.createBuffer(1, info.audio.length, info.sampleRate)
+    sourceBuffer.getChannelData(0).set(info.audio)
+  }
+  const node = ctx.createBufferSource()
+  node.buffer = sourceBuffer
+  node.connect(ctx.destination)
+  const offset = clamp(from, 0, info.duration)
+  const stopAt = clamp(limit, offset, info.duration)
+  const duration = stopAt - offset
+  if (duration > 0.005) node.start(0, offset, duration)
+  else node.start(0, offset)
+  sourceNode = node
+  playbackOffset = offset
+  playbackLimit = stopAt
+  playbackStartCtxTime = ctx.currentTime
+  playing.value = true
+  node.onended = () => {
+    if (sourceNode === node) {
+      playhead.value = playbackLimit
+      finishPlayback()
+    }
+  }
+  animationHandle = requestAnimationFrame(updatePlayhead)
+}
+
+function updatePlayhead(): void {
+  if (!playing.value || !audioContext) return
+  const t = playbackOffset + (audioContext.currentTime - playbackStartCtxTime)
+  playhead.value = Math.min(t, playbackLimit)
+  if (t >= playbackLimit) {
+    finishPlayback()
+    return
+  }
+  animationHandle = requestAnimationFrame(updatePlayhead)
+}
+
+function togglePlay(): void {
+  if (playing.value) finishPlayback()
+  else startPlayback(playhead.value, loaded.value?.duration ?? 0)
+}
+
+function playSelection(): void {
+  if (!loaded.value) return
+  startPlayback(selection.value.start, selection.value.end)
+}
+
+function seekTo(time: number): void {
+  if (!loaded.value) return
+  playhead.value = clamp(time, 0, loaded.value.duration)
+  if (playing.value) startPlayback(playhead.value, loaded.value.duration)
+}
+
 onMounted(async () => {
   const value = new DecoderClient()
   client.value = value
@@ -214,6 +308,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  finishPlayback()
+  void audioContext?.close()
   client.value?.dispose()
 })
 </script>
@@ -252,10 +348,18 @@ onBeforeUnmount(() => {
 
     <section class="panel">
       <h2>2. 频谱图与时间选区</h2>
+      <div class="row">
+        <button :disabled="!loaded" @click="togglePlay">{{ playing ? '⏸ 暂停' : '▶ 播放' }}</button>
+        <button :disabled="!loaded" @click="playSelection">▶ 播放选区</button>
+        <span class="hint">播放头 {{ playhead.toFixed(2) }}s · 点击频谱图可定位</span>
+      </div>
       <SpectrogramView
         v-model="selection"
         :spectrogram="loaded?.spectrogram ?? null"
         :duration="loaded?.duration ?? 1"
+        :playhead="playhead"
+        :follow="playing"
+        @seek="seekTo"
       />
     </section>
 

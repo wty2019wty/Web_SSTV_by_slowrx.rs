@@ -47,6 +47,8 @@ export interface LoadedInfo {
   /** 总时长（秒）。 */
   duration: number
   spectrogram: SpectrogramInfo
+  /** PCM 副本（主线程用于播放；Worker 另存原始副本用于解码）。 */
+  audio: Float32Array
 }
 
 /** 强制模式的锚点端点：选区开始或结束（方案 4.2/6.5）。 */

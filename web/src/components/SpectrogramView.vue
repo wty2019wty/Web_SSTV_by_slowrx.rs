@@ -11,7 +11,13 @@ import type { SpectrogramInfo, TimeSelection } from '../lib/protocol'
 const props = defineProps<{
   spectrogram: SpectrogramInfo | null
   duration: number
+  /** 播放头位置（秒）；null 表示不显示。 */
+  playhead?: number | null
+  /** 为 true 时播放头移出视口会自动跟随。 */
+  follow?: boolean
 }>()
+
+const emit = defineEmits<{ seek: [time: number] }>()
 
 const selection = defineModel<TimeSelection>({ required: true })
 
@@ -223,6 +229,26 @@ function drawOverlay(): void {
     ctx.stroke()
   }
 
+  // 播放头。
+  if (props.playhead !== null && props.playhead !== undefined) {
+    const px = timeToPx(props.playhead)
+    if (px >= LEFT && px <= canvas.width - RIGHT) {
+      ctx.strokeStyle = '#ffd166'
+      ctx.lineWidth = 1.5
+      ctx.beginPath()
+      ctx.moveTo(px, TOP)
+      ctx.lineTo(px, TOP + plotH)
+      ctx.stroke()
+      ctx.fillStyle = '#ffd166'
+      ctx.beginPath()
+      ctx.moveTo(px - 4, TOP)
+      ctx.lineTo(px + 4, TOP)
+      ctx.lineTo(px, TOP + 7)
+      ctx.closePath()
+      ctx.fill()
+    }
+  }
+
   // 选区。
   const sx = timeToPx(selection.value.start)
   const ex = timeToPx(selection.value.end)
@@ -350,6 +376,8 @@ function onPointerUp(e: PointerEvent): void {
   if (drag?.mode === 'create') {
     const span = selection.value.end - selection.value.start
     if (span < MIN_SPAN) {
+      // 视为“点击定位”：移动播放头并保留原选区。
+      emit('seek', drag.anchor)
       selection.value = previousSelection
     }
   }
@@ -435,6 +463,22 @@ watch(
 watch(view, () => scheduleRedraw(true))
 watch(selection, () => scheduleRedraw(false), { deep: true })
 watch(hoverX, () => scheduleRedraw(false))
+watch(
+  () => props.playhead,
+  (t) => {
+    if (t === null || t === undefined) {
+      scheduleRedraw(false)
+      return
+    }
+    if (props.follow && (t < view.value.t0 || t > view.value.t1)) {
+      // 播放头移出视口：平移视口使其回到左侧 15% 处。
+      const span = view.value.t1 - view.value.t0
+      setView(t - span * 0.15, t + span * 0.85)
+    } else {
+      scheduleRedraw(false)
+    }
+  },
+)
 </script>
 
 <template>

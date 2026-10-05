@@ -37,7 +37,11 @@ await server.listen()
 const url = 'http://127.0.0.1:5199/'
 console.log('开发服务器：', url)
 
-const browser = await puppeteer.launch({ executablePath, headless: true, args: ['--no-sandbox'] })
+const browser = await puppeteer.launch({
+  executablePath,
+  headless: true,
+  args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'],
+})
 let failures = 0
 function check(condition, message) {
   if (condition) console.log('  ✓', message)
@@ -157,6 +161,25 @@ try {
   const maxIntensity = await spectrogramMax(page)
   console.log('频谱图最大强度：', maxIntensity)
   check(maxIntensity > 120, '频谱图渲染出高亮内容')
+
+  // --- 音频播放（播放头推进）---
+  await clickButtonByText(page, '▶ 播放')
+  const advanced = await page
+    .waitForFunction(
+      () => {
+        const el = [...document.querySelectorAll('.hint')].find((e) =>
+          e.textContent.includes('播放头'),
+        )
+        if (!el) return false
+        const match = el.textContent.match(/播放头\s+([\d.]+)s/)
+        return match ? parseFloat(match[1]) > 0.3 : false
+      },
+      { timeout: 15_000, polling: 100 },
+    )
+    .then(() => true)
+    .catch(() => false)
+  check(advanced, '播放头随时间推进（音频可播放）')
+  await clickButtonByText(page, '⏸ 暂停')
 
   // --- 自动识模解码选区 ---
   await decodeAndCheck(page, '自动识模')
