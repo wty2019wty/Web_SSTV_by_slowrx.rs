@@ -10,7 +10,6 @@ on:
   push:
     branches:
       - main
-      - page
   workflow_dispatch:
 
 # 允许 GITHUB_TOKEN 发布到 Pages（id-token 供 deploy-pages 做 OIDC 校验）。
