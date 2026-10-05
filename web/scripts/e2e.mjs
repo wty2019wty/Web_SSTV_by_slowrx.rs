@@ -145,8 +145,30 @@ async function resultInfo(page, index) {
   }, index)
 }
 
+/** 读取播放头秒数。 */
+async function playheadSeconds(page) {
+  const text = await page.$$eval(
+    '.hint',
+    (els) => els.map((e) => e.textContent ?? '').find((t) => t.includes('播放头')) ?? '',
+  )
+  const match = text.match(/播放头\s+([\d.]+)s/)
+  return match ? parseFloat(match[1]) : -1
+}
+
+/** 在频谱图指定水平比例处点击，用播放头当锚点。 */
+async function clickSpectrogram(page, fraction) {
+  await page.$eval('.canvas-wrap', (el) => el.scrollIntoView({ block: 'center' }))
+  const box = await page.$eval('.canvas-wrap', (el) => {
+    const rect = el.getBoundingClientRect()
+    return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+  })
+  const x = box.x + 50 + (box.width - 62) * fraction
+  await page.mouse.click(x, box.y + box.height / 2)
+}
+
 try {
   const page = await browser.newPage()
+  await page.setViewport({ width: 1280, height: 900 })
   page.on('pageerror', (e) => console.error('  [pageerror]', e.message))
   page.on('workercreated', (w) =>
     w.on('console', (m) => console.log('  [worker]', m.type(), m.text())),
@@ -216,10 +238,12 @@ try {
     ),
   )
   const markerText = await page.$eval('.selection', (el) => el.textContent ?? '')
-  check(
-    markerText.includes('起点') && markerText.includes('终点'),
-    `强制模式显示起点/终点标记（${markerText.trim()}）`,
-  )
+  check(markerText.includes('播放头'), `强制模式用播放头当锚点（${markerText.trim()}）`)
+
+  // 把播放头点到最左当「起点」锚点。
+  await clickSpectrogram(page, 0)
+  const nearStart = await playheadSeconds(page)
+  check(nearStart >= 0 && nearStart < 10, `点击频谱图定位播放头（${nearStart}s）`)
   await selectByOptionText(page, '选区结束', 'start')
   await clickButtonByText(page, '解码选区')
   await waitForResults(page, 1)
@@ -227,6 +251,10 @@ try {
   check((forcedStart?.meanR ?? 0) > 10, `强制模式(锚点=开始)非全黑（平均 R ${forcedStart?.meanR.toFixed(1)}）`)
 
   // --- 强制模式（锚点=选区结束）---
+  // 把播放头点到最右当「终点」锚点。
+  await clickSpectrogram(page, 1)
+  const nearEnd = await playheadSeconds(page)
+  check(nearEnd > 200, `点击最右定位播放头（${nearEnd}s）`)
   await selectByOptionText(page, '选区结束', 'end')
   await clickButtonByText(page, '解码选区')
   await waitForResults(page, 1)
