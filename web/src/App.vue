@@ -778,11 +778,11 @@ onBeforeUnmount(() => {
             输入设备
             <select v-model="selectedInputId" :disabled="liveActive || liveBusy">
               <option
-                v-for="device in audioInputs"
+                v-for="(device, index) in audioInputs"
                 :key="device.deviceId"
                 :value="device.deviceId"
               >
-                {{ device.label || '麦克风（未授权，设备名不可见）' }}
+                {{ device.label || `麦克风 ${index + 1}（设备名未公开）` }}
               </option>
             </select>
           </label>
