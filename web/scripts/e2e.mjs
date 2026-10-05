@@ -215,6 +215,11 @@ try {
       o.textContent.includes('选区结束'),
     ),
   )
+  const markerText = await page.$eval('.selection', (el) => el.textContent ?? '')
+  check(
+    markerText.includes('起点') && markerText.includes('终点'),
+    `强制模式显示起点/终点标记（${markerText.trim()}）`,
+  )
   await selectByOptionText(page, '选区结束', 'start')
   await clickButtonByText(page, '解码选区')
   await waitForResults(page, 1)

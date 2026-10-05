@@ -29,6 +29,8 @@ const synthMode = ref('pd120')
 /** 解码模式：`auto` = VIS 自动识模；其余为强制模式。 */
 const decodeMode = ref('auto')
 const forcedAnchor = ref<ForcedAnchor>('start')
+/** 强制模式的起点/终点标记（秒）。 */
+const forcedPoints = ref<TimeSelection>({ start: 0, end: 1 })
 const synthWithVis = ref(true)
 /** 合成音频重复的图片数（用于验证多图自动识模）。 */
 const synthCount = ref(1)
@@ -155,6 +157,7 @@ function applyLoaded(info: LoadedInfo) {
   sourceBuffer = null
   loaded.value = info
   selection.value = { start: 0, end: info.duration }
+  forcedPoints.value = { start: 0, end: info.duration }
   playhead.value = 0
   results.value = []
 }
@@ -162,9 +165,12 @@ function applyLoaded(info: LoadedInfo) {
 async function decodeSelection() {
   const clientValue = client.value
   if (!clientValue || busy.value || !loaded.value) return
-  const startSample = Math.round(selection.value.start * loaded.value.sampleRate)
-  const endSample = Math.round(selection.value.end * loaded.value.sampleRate)
-  if (endSample <= startSample) {
+  const rate = loaded.value.sampleRate
+  // 强制模式用「起点/终点」标记，自动识模用范围选区。
+  const range = isForced.value ? forcedPoints.value : selection.value
+  const startSample = Math.round(range.start * rate)
+  const endSample = Math.round(range.end * rate)
+  if (!isForced.value && endSample <= startSample) {
     status.value = '选区为空'
     return
   }
@@ -279,7 +285,8 @@ function togglePlay(): void {
 
 function playSelection(): void {
   if (!loaded.value) return
-  startPlayback(selection.value.start, selection.value.end)
+  const range = isForced.value ? forcedPoints.value : selection.value
+  startPlayback(range.start, range.end)
 }
 
 function seekTo(time: number): void {
@@ -361,10 +368,12 @@ onBeforeUnmount(() => {
       </div>
       <SpectrogramView
         v-model="selection"
+        v-model:points="forcedPoints"
         :spectrogram="loaded?.spectrogram ?? null"
         :duration="loaded?.duration ?? 1"
         :playhead="playhead"
         :follow="playing"
+        :interaction="isForced ? 'points' : 'range'"
         @seek="seekTo"
       />
     </section>
@@ -391,7 +400,8 @@ onBeforeUnmount(() => {
         <button :disabled="busy || !loaded" @click="decodeSelection">解码选区</button>
       </div>
       <p v-if="isForced" class="hint">
-        强制模式只需一个锚点：长度由模式标称时长决定，会从锚点一直读取到文件末尾。
+        在频谱图上拖拽「起点」（绿）/「终点」（橙）标记到对应时刻；解码用「锚点」选中的那一个，
+        长度由模式标称时长决定（会从锚点一直读取到文件末尾）。
       </p>
       <p v-else class="hint">
         自动识模会按选区范围内的 VIS 头依次解码，可能得到多张图像。

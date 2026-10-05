@@ -15,11 +15,15 @@ const props = defineProps<{
   playhead?: number | null
   /** 为 true 时播放头移出视口会自动跟随。 */
   follow?: boolean
+  /** 交互模式：`range` = 拖拽时间选区；`points` = 直接标定起点/终点。 */
+  interaction?: 'range' | 'points'
 }>()
 
 const emit = defineEmits<{ seek: [time: number] }>()
 
 const selection = defineModel<TimeSelection>({ required: true })
+// 强制模式使用：直接标定的起点/终点（两个独立标记点）。
+const points = defineModel<TimeSelection>('points', { default: () => ({ start: 0, end: 1 }) })
 
 // 画布内边距（像素）。
 const LEFT = 46
@@ -41,8 +45,14 @@ const hoverX = ref<number | null>(null)
 
 const totalDuration = computed(() => Math.max(props.duration, 0.001))
 const selectionText = computed(() => {
-  const start = Math.max(0, Math.min(selection.value.start, totalDuration.value))
-  const end = Math.max(start, Math.min(selection.value.end, totalDuration.value))
+  const bound = (value: number) => Math.max(0, Math.min(value, totalDuration.value))
+  if (props.interaction === 'points') {
+    const start = bound(points.value.start)
+    const end = bound(points.value.end)
+    return `起点 ${start.toFixed(2)}s · 终点 ${end.toFixed(2)}s`
+  }
+  const start = bound(selection.value.start)
+  const end = Math.max(start, bound(selection.value.end))
   return `${start.toFixed(2)}s – ${end.toFixed(2)}s（${(end - start).toFixed(2)}s）`
 })
 
@@ -211,6 +221,35 @@ function formatTime(t: number): string {
   return m > 0 ? `${m}:${s.toFixed(1).padStart(4, '0')}` : `${s.toFixed(1)}s`
 }
 
+/** 绘制一个可拖拽的标记点（竖线 + 顶部三角 + 标签）。 */
+function drawMarker(
+  ctx: CanvasRenderingContext2D,
+  time: number,
+  color: string,
+  label: string,
+  plotH: number,
+): void {
+  const x = timeToPx(time)
+  ctx.strokeStyle = color
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.moveTo(x, TOP)
+  ctx.lineTo(x, TOP + plotH)
+  ctx.stroke()
+  ctx.fillStyle = color
+  ctx.beginPath()
+  ctx.moveTo(x - 5, TOP)
+  ctx.lineTo(x + 5, TOP)
+  ctx.lineTo(x, TOP + 8)
+  ctx.closePath()
+  ctx.fill()
+  ctx.font = '10px ui-monospace, monospace'
+  ctx.textBaseline = 'top'
+  ctx.textAlign = 'center'
+  ctx.fillText(label, x, TOP + 9)
+  ctx.textAlign = 'left'
+}
+
 function drawOverlay(): void {
   const canvas = overlayCanvas.value
   if (!canvas) return
@@ -247,6 +286,13 @@ function drawOverlay(): void {
       ctx.closePath()
       ctx.fill()
     }
+  }
+
+  if (props.interaction === 'points') {
+    // 强制模式：起点/终点两个独立标记。
+    drawMarker(ctx, points.value.start, '#4ade80', '起点', plotH)
+    drawMarker(ctx, points.value.end, '#fb923c', '终点', plotH)
+    return
   }
 
   // 选区。
@@ -298,6 +344,8 @@ type Drag =
   | { mode: 'move'; grab: number }
   | { mode: 'resize-start' }
   | { mode: 'resize-end' }
+  | { mode: 'point-start' }
+  | { mode: 'point-end' }
   | { mode: 'pan'; startX: number; startT0: number; startT1: number }
 
 let drag: Drag | null = null
@@ -320,6 +368,22 @@ function onPointerDown(e: PointerEvent): void {
     return
   }
   const t = clamp(pxToTime(x), 0, totalDuration.value)
+
+  // 强制模式：只标定起点/终点两个标记点，不创建范围选区。
+  if (props.interaction === 'points') {
+    const sx = timeToPx(points.value.start)
+    const ex = timeToPx(points.value.end)
+    if (Math.abs(x - sx) <= EDGE_PX) {
+      drag = { mode: 'point-start' }
+    } else if (Math.abs(x - ex) <= EDGE_PX) {
+      drag = { mode: 'point-end' }
+    } else {
+      // 空白处单击：移动播放头。
+      emit('seek', t)
+    }
+    return
+  }
+
   const sx = timeToPx(selection.value.start)
   const ex = timeToPx(selection.value.end)
   if (Math.abs(x - sx) <= EDGE_PX) {
@@ -366,12 +430,27 @@ function onPointerMove(e: PointerEvent): void {
     case 'resize-end':
       selection.value = { start: selection.value.start, end: clamp(t, selection.value.start, duration) }
       break
+    case 'point-start':
+      points.value = { start: clamp(t, 0, points.value.end), end: points.value.end }
+      break
+    case 'point-end':
+      points.value = { start: points.value.start, end: clamp(t, points.value.start, duration) }
+      break
   }
 }
 
 function onPointerUp(e: PointerEvent): void {
   if (root.value?.hasPointerCapture(e.pointerId)) {
     root.value.releasePointerCapture(e.pointerId)
+  }
+  if (props.interaction === 'points') {
+    const duration = totalDuration.value
+    points.value = {
+      start: clamp(points.value.start, 0, duration),
+      end: clamp(points.value.end, 0, duration),
+    }
+    drag = null
+    return
   }
   if (drag?.mode === 'create') {
     const span = selection.value.end - selection.value.start
@@ -392,6 +471,13 @@ function onPointerUp(e: PointerEvent): void {
 function updateCursor(x: number): void {
   const el = root.value
   if (!el) return
+  if (props.interaction === 'points') {
+    const sx = timeToPx(points.value.start)
+    const ex = timeToPx(points.value.end)
+    el.style.cursor =
+      Math.abs(x - sx) <= EDGE_PX || Math.abs(x - ex) <= EDGE_PX ? 'ew-resize' : 'crosshair'
+    return
+  }
   const sx = timeToPx(selection.value.start)
   const ex = timeToPx(selection.value.end)
   if (Math.abs(x - sx) <= EDGE_PX || Math.abs(x - ex) <= EDGE_PX) {
@@ -535,6 +621,7 @@ watch(
 )
 watch(view, () => scheduleRedraw(true))
 watch(selection, () => scheduleRedraw(false), { deep: true })
+watch(points, () => scheduleRedraw(false), { deep: true })
 watch(hoverX, () => scheduleRedraw(false))
 watch(
   () => props.playhead,
@@ -560,7 +647,7 @@ watch(
       <button type="button" :disabled="!spectrogram" @click="fit">全览</button>
       <button type="button" :disabled="!spectrogram" @click="zoomBy(1 / 1.5)">放大</button>
       <button type="button" :disabled="!spectrogram" @click="zoomBy(1.5)">缩小</button>
-      <span class="selection">选区 {{ selectionText }}</span>
+      <span class="selection">{{ interaction === 'points' ? '标记' : '选区' }} {{ selectionText }}</span>
       <span class="hint">滚轮缩放 · Shift+滚轮平移 · Alt/中键拖拽平移</span>
     </div>
     <div
