@@ -1,0 +1,16 @@
+{
+  "name": "web-sstv-root",
+  "private": true,
+  "version": "0.1.0",
+  "description": "工作区脚本入口；实际前端项目在 web/ 下",
+  "scripts": {
+    "dev": "npm --prefix web run dev",
+    "build": "npm --prefix web run build",
+    "preview": "npm --prefix web run preview",
+    "typecheck": "npm --prefix web run typecheck",
+    "e2e": "npm --prefix web run e2e",
+    "install:web": "npm --prefix web install",
+    "wasm": "powershell -NoProfile -ExecutionPolicy Bypass -File build-wasm.ps1 -Dev",
+    "wasm:prod": "powershell -NoProfile -ExecutionPolicy Bypass -File build-wasm.ps1"
+  }
+}

@@ -50,14 +50,18 @@ cargo install wasm-bindgen-cli --version 0.2.129 --locked
 # 1) 构建 wasm 并生成前端绑定（-Dev 启用合成测试音频）
 .\build-wasm.ps1 -Dev
 
-# 2) 安装前端依赖并启动开发服务器
-. .\node_env.ps1
-cd web
-npm install
+# 2) 安装前端依赖（只需一次）
+npm run install:web
+
+# 3) 启动开发服务器（根目录或 web/ 均可）
 npm run dev
 ```
 
-打开 <http://127.0.0.1:5173/>，选择模式后点“解码合成音频”，或选择本地音频文件。
+打开 <http://127.0.0.1:5173/>，选择模式后点“生成合成音频”，在频谱图上拖拽选区后点“解码选区”，
+或“选择音频文件”载入本地录音。
+
+> 根目录的 `package.json` 只是脚本入口（`npm run dev` / `build` / `e2e` / `wasm` 等会委托到
+> `web/`）。前端项目本体在 `web/`，也可以 `cd web` 后直接用 `npm run dev`。
 
 > `slowrx` 通过 git 依赖锁定在 fork 的 `sstv-web` 分支（含强制模式 / 解码窗口
 > `#113`/`#114`）。构建需能访问 GitHub。
