@@ -7,7 +7,12 @@
 //   - 强制模式：只需一个锚点（选区开始或结束），从锚点一直喂到文件末尾
 //     + 末尾静音，由 slowrx 按模式标称时长截取解码窗口。
 
-import init, { WasmDecoder, listModes, computeSpectrogram } from '../wasm/slowrx_wasm.js'
+import init, {
+  WasmDecoder,
+  StreamingSpectrogram,
+  listModes,
+  computeSpectrogram,
+} from '../wasm/slowrx_wasm.js'
 // 显式带上 wasm 的 URL，交给 Vite 处理（dev 与 build 都能正确定位资源）。
 import wasmUrl from '../wasm/slowrx_wasm_bg.wasm?url'
 import type {
@@ -40,6 +45,35 @@ interface Session {
 }
 
 let session: Session | null = null
+
+/** 实时接收会话（同一时刻至多一个）：常驻解码器 + 流式频谱图。 */
+interface LiveSession {
+  sampleRate: number
+  decoder: WasmDecoder
+  spec: StreamingSpectrogram
+  bins: number
+  /** 已产出的累计列数（用于给每批标注 firstColumn）。 */
+  columns: number
+  images: number
+  startedAt: number
+}
+let live: LiveSession | null = null
+
+/** 实时瀑布图的显示上限频率（Hz）。 */
+const LIVE_MAX_HZ = 4000
+/** 目标频率分辨率（Hz/bin），据此按采样率挑选 FFT 长度。 */
+const LIVE_TARGET_BIN_HZ = 10.8
+
+/**
+ * 按采样率挑选 2 的幂 FFT 长度，使 bin 宽度接近 {@link LIVE_TARGET_BIN_HZ}。
+ * 例如 48 kHz → 4096 点（≈11.7 Hz/bin），11.025 kHz → 1024 点。
+ */
+function pickLiveFftSize(sampleRate: number): number {
+  const target = Math.round(sampleRate / LIVE_TARGET_BIN_HZ)
+  let fft = 1024
+  while (fft < target && fft < 8192) fft <<= 1
+  return fft
+}
 
 /** STFT 参数：11025 Hz 下频率分辨率约 10.8 Hz，75% 重叠。 */
 const FFT_SIZE = 1024
@@ -167,6 +201,78 @@ function decodeSelection(
   }
 }
 
+/** 建立实时接收会话：常驻解码器（自动识模）+ 流式频谱图。 */
+function startLive(requestId: number, sampleRate: number): void {
+  if (live) stopLiveInternal(requestId)
+  const fftSize = pickLiveFftSize(sampleRate)
+  const hop = Math.max(1, fftSize >> 1)
+  const spec = new StreamingSpectrogram(sampleRate, fftSize, hop, LIVE_MAX_HZ)
+  const decoder = new WasmDecoder(sampleRate)
+  // 实时接收启用渐进（逐行）解码：锁定同步后每收够一行就解一行并回传
+  // `line` 事件；整图末尾用完整 sync 重解一次保证精度（见 slowrx decoder.rs）。
+  decoder.setProgressive(true)
+  live = {
+    sampleRate,
+    decoder,
+    spec,
+    bins: spec.bins,
+    columns: 0,
+    images: 0,
+    startedAt: performance.now(),
+  }
+  post({
+    type: 'liveStarted',
+    requestId,
+    sampleRate,
+    bins: spec.bins,
+    hop: spec.hop,
+    secondsPerColumn: spec.secondsPerColumn,
+    maxHz: spec.maxHz,
+  })
+}
+
+/** 推入一块实时音频：喂解码器并产出瀑布图新列。 */
+function pushLive(requestId: number, samples: Float32Array): void {
+  const current = live
+  if (!current) return
+
+  // 1) 常驻解码器：自动识模，收满一张图即产出事件。
+  const events = current.decoder.pushAudio(samples) as DecodeEvent[]
+  for (const event of events) {
+    if (event.type === 'image') current.images++
+    post({ type: 'event', requestId, event })
+  }
+
+  // 2) 流式频谱图：只回传本批新产生的列。
+  const columns = current.spec.push(samples)
+  const count = columns.length / current.bins
+  if (count > 0) {
+    const firstColumn = current.columns
+    current.columns += count
+    post(
+      { type: 'liveColumns', requestId, columns, firstColumn, count, bins: current.bins },
+      [columns.buffer],
+    )
+  }
+}
+
+/** 结束实时会话并释放 wasm 资源。 */
+function stopLiveInternal(requestId: number): { elapsedMs: number; imageCount: number } {
+  const current = live
+  live = null
+  if (!current) return { elapsedMs: 0, imageCount: 0 }
+  // 收尾精修：对进行中的图像用已收集的完整 sync 重解已到齐的行，发出逐行事件
+  // 与一张 partial 图；整图已完成的会话此调用返回空。
+  const finalEvents = current.decoder.finalize() as DecodeEvent[]
+  for (const event of finalEvents) {
+    if (event.type === 'image') current.images++
+    post({ type: 'event', requestId, event })
+  }
+  current.decoder.free()
+  current.spec.free()
+  return { elapsedMs: performance.now() - current.startedAt, imageCount: current.images }
+}
+
 ctx.onmessage = async (e: MessageEvent<MainToWorker>) => {
   const message = e.data
   try {
@@ -196,6 +302,20 @@ ctx.onmessage = async (e: MessageEvent<MainToWorker>) => {
           message.mode,
           message.anchor ?? 'start',
         )
+        break
+      }
+      case 'liveStart': {
+        await ensureReady()
+        startLive(message.requestId, message.sampleRate)
+        break
+      }
+      case 'livePush': {
+        pushLive(message.requestId, message.samples)
+        break
+      }
+      case 'liveStop': {
+        const summary = stopLiveInternal(message.requestId)
+        post({ type: 'liveStopped', requestId: message.requestId, ...summary })
         break
       }
     }

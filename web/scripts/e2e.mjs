@@ -41,7 +41,13 @@ console.log('开发服务器：', url)
 const browser = await puppeteer.launch({
   executablePath,
   headless: true,
-  args: ['--no-sandbox', '--autoplay-policy=no-user-gesture-required'],
+  args: [
+    '--no-sandbox',
+    '--autoplay-policy=no-user-gesture-required',
+    // 用 Chrome 伪音频设备跑通麦克风实时接收链路（无真实麦克风的 CI/本机）。
+    '--use-fake-ui-for-media-stream',
+    '--use-fake-device-for-media-stream',
+  ],
 })
 let failures = 0
 function check(condition, message) {
@@ -65,6 +71,14 @@ async function clickButtonByText(page, text) {
 async function waitStatusContains(page, text, timeout) {
   await page.waitForFunction(
     (needle) => document.querySelector('.status')?.textContent?.includes(needle),
+    { timeout, polling: 300 },
+    text,
+  )
+}
+
+async function waitLiveStatusContains(page, text, timeout) {
+  await page.waitForFunction(
+    (needle) => document.querySelector('.live-status')?.textContent?.includes(needle),
     { timeout, polling: 300 },
     text,
   )
@@ -294,6 +308,66 @@ try {
   const forcedEnd = await resultInfo(page, 0)
   check((forcedEnd?.meanR ?? 0) > 10, `强制模式(锚点=结束)非全黑（平均 R ${forcedEnd?.meanR.toFixed(1)}）`)
   check((await page.$eval('.status', (el) => el.textContent))?.includes('完成'), '强制模式状态完成')
+
+  // --- 实时接收（麦克风，Chrome 伪设备）---
+  await clickButtonByText(page, '麦克风')
+  await clickButtonByText(page, '开始接收')
+  let liveStarted = false
+  try {
+    await waitLiveStatusContains(page, '实时接收中', 30_000)
+    liveStarted = true
+  } catch {
+    liveStarted = false
+  }
+  check(liveStarted, '麦克风实时接收已启动')
+
+  if (liveStarted) {
+    const hasWaterfall = await page
+      .waitForFunction(
+        () => {
+          const canvas = document.querySelector('.waterfall-wrap canvas')
+          if (!canvas) return false
+          const ctx = canvas.getContext('2d')
+          const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i] > 80 || data[i + 1] > 80 || data[i + 2] > 80) return true
+          }
+          return false
+        },
+        { timeout: 20_000, polling: 300 },
+      )
+      .then(() => true)
+      .catch(() => false)
+    check(hasWaterfall, '实时瀑布图渲染出内容')
+
+    await clickButtonByText(page, '停止接收')
+    await waitLiveStatusContains(page, '已停止', 15_000).catch(() => undefined)
+    const stoppedText = await page.$eval('.live-status', (el) => el.textContent ?? '')
+    check(stoppedText.includes('已停止'), '实时接收已停止')
+
+    // --- 输入诊断：显示实际生效的音频约束 ---
+    const diagText = await page.$eval('.diag', (el) => el.textContent ?? '').catch(() => '')
+    check(
+      diagText.includes('回声消除') && diagText.includes('自动增益') && diagText.includes('采样率'),
+      '输入诊断显示实际生效的音频约束',
+    )
+
+    // --- 录音 + 离线重解 ---
+    const redecodeReady = await page.evaluate(() => {
+      const b = [...document.querySelectorAll('button')].find((x) =>
+        x.textContent.includes('重解录音'),
+      )
+      return !!b && !b.disabled
+    })
+    check(redecodeReady, '停止后可用离线路径重解录音（录音已保存）')
+
+    if (redecodeReady) {
+      await clickButtonByText(page, '重解录音')
+      await waitStatusContains(page, '完成', 60_000).catch(() => undefined)
+      const reStatus = await page.$eval('.status', (el) => el.textContent ?? '')
+      check(reStatus.includes('完成'), '离线路径重解录音完成')
+    }
+  }
 } catch (error) {
   failures++
   console.error('E2E 异常：', error instanceof Error ? error.message : error)

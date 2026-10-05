@@ -7,6 +7,7 @@
 // - 在地图上拖拽创建选区；拖动选区内部可移动；拖动两端可缩放。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { SpectrogramInfo, TimeSelection } from '../lib/protocol'
+import { MAGMA_LUT } from '../lib/colorMap'
 
 const props = defineProps<{
   spectrogram: SpectrogramInfo | null
@@ -72,33 +73,8 @@ const selectionText = computed(() => {
   return `${start.toFixed(2)}s – ${end.toFixed(2)}s（${(end - start).toFixed(2)}s）`
 })
 
-// --- 颜色映射（magma 近似） ---------------------------------------------
-const COLOR_STOPS: ReadonlyArray<readonly [number, number, number]> = [
-  [0, 0, 4],
-  [28, 16, 68],
-  [79, 18, 123],
-  [129, 37, 129],
-  [181, 54, 122],
-  [229, 80, 100],
-  [251, 135, 97],
-  [254, 194, 135],
-  [252, 253, 191],
-]
-const LUT = (() => {
-  const lut = new Uint8ClampedArray(256 * 3)
-  for (let i = 0; i < 256; i++) {
-    const t = (i / 255) * (COLOR_STOPS.length - 1)
-    const i0 = Math.floor(t)
-    const i1 = Math.min(i0 + 1, COLOR_STOPS.length - 1)
-    const f = t - i0
-    const a = COLOR_STOPS[i0]
-    const b = COLOR_STOPS[i1]
-    lut[i * 3] = a[0] + (b[0] - a[0]) * f
-    lut[i * 3 + 1] = a[1] + (b[1] - a[1]) * f
-    lut[i * 3 + 2] = a[2] + (b[2] - a[2]) * f
-  }
-  return lut
-})()
+// --- 颜色映射（magma 近似，与瀑布图共用） --------------------------------
+const LUT = MAGMA_LUT
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))

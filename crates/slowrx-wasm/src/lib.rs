@@ -79,6 +79,7 @@ fn event_to_js(event: CoreEvent) -> JsValue {
             width,
             height,
             rgba,
+            partial,
         } => {
             set(&object, "type", JsValue::from_str("image"));
             set(&object, "mode", JsValue::from_str(mode));
@@ -89,6 +90,7 @@ fn event_to_js(event: CoreEvent) -> JsValue {
                 "rgba",
                 js_sys::Uint8Array::from(rgba.as_slice()).into(),
             );
+            set(&object, "partial", JsValue::from_bool(partial));
         }
     }
     object.into()
@@ -134,6 +136,27 @@ impl WasmDecoder {
     #[wasm_bindgen(js_name = clearForcedMode)]
     pub fn clear_forced_mode(&mut self) {
         self.inner.clear_forced_mode();
+    }
+
+    /// 开启/关闭渐进（实时）解码（默认关闭）。
+    ///
+    /// 开启后解码器不再攒满整图再爆发解码，而是锁定同步后**逐行**产出
+    /// `line` 事件（随后仍有 `image` 事件），适合实时接收时边收边画。
+    #[wasm_bindgen(js_name = setProgressive)]
+    pub fn set_progressive(&mut self, enabled: bool) {
+        self.inner.set_progressive(enabled);
+    }
+
+    /// 收尾：对进行中的图像做一次精修（用完整 sync 重解已到齐的行），
+    /// 返回逐行事件与一张 `partial: true` 的 `image`。未在解码中时返回空数组。
+    #[wasm_bindgen(js_name = finalize)]
+    pub fn finalize(&mut self) -> js_sys::Array {
+        let events = self.inner.finalize();
+        let array = js_sys::Array::new();
+        for event in events {
+            array.push(&event_to_js(event));
+        }
+        array
     }
 
     /// 丢弃进行中的图像并复位状态（保留强制模式设置）。
@@ -244,6 +267,87 @@ impl Spectrogram {
     /// 列优先的强度矩阵，长度 `columns * bins`。
     pub fn data(&self) -> js_sys::Uint8Array {
         js_sys::Uint8Array::from(self.inner.data())
+    }
+}
+
+/// 流式 STFT（实时接收时的滚动瀑布图）。
+///
+/// 与 [`Spectrogram`] 使用相同的加窗与归一化；按块 `push` 音频，只返回本批
+/// **新产生的**频谱列，避免为持续数分钟的实时流反复重算整段。
+#[wasm_bindgen]
+pub struct StreamingSpectrogram {
+    inner: spectrogram::StreamingSpectrogram,
+}
+
+#[wasm_bindgen]
+impl StreamingSpectrogram {
+    /// 构造流式 STFT。`fft_size`、`hop`、`max_hz` 传 0 时使用默认值。
+    ///
+    /// # Errors
+    /// 参数非法时抛出错误。
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        sample_rate: u32,
+        fft_size: u32,
+        hop: u32,
+        max_hz: f64,
+    ) -> Result<StreamingSpectrogram, JsValue> {
+        let fft_size = if fft_size == 0 {
+            spectrogram::DEFAULT_FFT_SIZE
+        } else {
+            fft_size as usize
+        };
+        let hop = if hop == 0 {
+            // 实时默认 50% 重叠：列更少、滚动更平滑，且频率分辨率不变。
+            fft_size / 2
+        } else {
+            hop as usize
+        };
+        let max_hz = if max_hz <= 0.0 {
+            spectrogram::DEFAULT_MAX_HZ
+        } else {
+            max_hz
+        };
+        spectrogram::StreamingSpectrogram::new(sample_rate, fft_size, hop, max_hz)
+            .map(|inner| StreamingSpectrogram { inner })
+            .ok_or_else(|| JsValue::from_str("流式频谱图参数非法"))
+    }
+
+    /// 推入一段音频，返回本批新产生的频谱列（列优先 8 位强度，长度
+    /// `新列数 × bins`）。不足一帧时返回空数组。
+    pub fn push(&mut self, samples: &[f32]) -> js_sys::Uint8Array {
+        let columns = self.inner.push(samples);
+        js_sys::Uint8Array::from(columns.as_slice())
+    }
+
+    /// 每列的频率 bin 数。
+    #[wasm_bindgen(getter)]
+    pub fn bins(&self) -> u32 {
+        self.inner.bins()
+    }
+
+    /// 帧移（输入采样点）。
+    #[wasm_bindgen(getter)]
+    pub fn hop(&self) -> u32 {
+        self.inner.hop()
+    }
+
+    /// 输入采样率。
+    #[wasm_bindgen(getter, js_name = sampleRate)]
+    pub fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    /// 显示上限频率（Hz）。
+    #[wasm_bindgen(getter, js_name = maxHz)]
+    pub fn max_hz(&self) -> f64 {
+        self.inner.max_hz()
+    }
+
+    /// 每列代表的时间跨度（秒）。
+    #[wasm_bindgen(getter, js_name = secondsPerColumn)]
+    pub fn seconds_per_column(&self) -> f64 {
+        self.inner.seconds_per_column()
     }
 }
 
