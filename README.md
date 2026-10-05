@@ -66,6 +66,21 @@ npm run dev
 > `slowrx` 通过 git 依赖锁定在 fork 的 `sstv-web` 分支（含强制模式 / 解码窗口
 > `#113`/`#114`）。构建需能访问 GitHub。
 
+## 部署（GitHub Pages）
+
+推送到 `main` 或 `page` 分支（也可在 Actions 页面手动触发）会运行
+`.github/workflows/deploy-pages.yml`：在 Ubuntu runner 上执行
+`cargo build → wasm-bindgen → npm ci → vite build`，并把 `web/dist` 发布到
+GitHub Pages。
+
+站点地址：<https://wty2019wty.github.io/Web_SSTV_by_slowrx.rs/>
+
+首次使用需在仓库 **Settings → Pages** 里把 **Source** 设为 **GitHub Actions**。
+工作流由 GitHub 注入的 `GITHUB_REPOSITORY` 自动推导 Vite 的 `base`
+（`/Web_SSTV_by_slowrx.rs/`），本地开发仍回退到根路径；如部署到别处可用
+`VITE_BASE` 覆盖。若从非默认分支（如 `page`）部署，请在
+**Settings → Environments → github-pages** 的部署分支策略中放行该分支。
+
 ## 验证
 
 ```powershell

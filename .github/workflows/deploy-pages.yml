@@ -1,0 +1,97 @@
+# 构建并在 GitHub Pages 上发布 Web 端 SSTV 工具。
+#
+# 站点地址：https://wty2019wty.github.io/Web_SSTV_by_slowrx.rs/
+# 构建链路：Rust 1.95.0 → wasm32-unknown-unknown → wasm-bindgen → Vite/Vue → web/dist
+#
+# 前置条件（仓库 Settings → Pages）：Source 选择 “GitHub Actions”。
+name: 部署到 GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+      - page
+  workflow_dispatch:
+
+# 允许 GITHUB_TOKEN 发布到 Pages（id-token 供 deploy-pages 做 OIDC 校验）。
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只保留一条 Pages 部署流水线，避免并发上传互相覆盖。
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 构建站点
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # rust-toolchain.toml 固定了 1.95.0 + rustfmt/clippy + wasm32 目标；
+      # 这里按同样规格预装，避免首次调用 cargo 时临时补齐组件。
+      - name: 安装 Rust 工具链（含 wasm32-unknown-unknown）
+        run: |
+          rustup toolchain install 1.95.0 \
+            --profile minimal \
+            --component rustfmt --component clippy \
+            --target wasm32-unknown-unknown \
+            --no-self-update
+
+      - name: 缓存 Rust 构建产物
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          shared-key: wasm
+
+      # wasm-bindgen-cli 版本必须与 Cargo.lock 里的 wasm-bindgen crate 严格一致（当前 0.2.129）。
+      - name: 安装 wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@0.2.129
+
+      - name: 构建 wasm 与 JS 绑定
+        run: |
+          set -euo pipefail
+          cargo build -p slowrx-wasm --release --target wasm32-unknown-unknown
+          mkdir -p web/src/wasm
+          wasm-bindgen target/wasm32-unknown-unknown/release/slowrx_wasm.wasm \
+            --out-dir web/src/wasm --target web --out-name slowrx_wasm
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 安装前端依赖
+        run: npm ci --prefix web
+
+      # vite.config.ts 会读取 GITHUB_REPOSITORY 推导 base=/Web_SSTV_by_slowrx.rs/。
+      - name: 构建前端
+        run: npm --prefix web run build
+
+      - name: 配置 Pages
+        uses: actions/configure-pages@v5
+
+      - name: 上传站点产物
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    name: 发布到 GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 部署
+        id: deployment
+        uses: actions/deploy-pages@v4
