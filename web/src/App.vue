@@ -34,6 +34,8 @@ const synthWithVis = ref(true)
 const synthCount = ref(1)
 
 const loaded = ref<LoadedInfo | null>(null)
+/** 当前音频来源名称（文件名或「合成音频」），用于在界面上持久展示。 */
+const sourceName = ref('')
 const selection = ref<TimeSelection>({ start: 0, end: 1 })
 const results = ref<DecodedImage[]>([])
 
@@ -120,6 +122,7 @@ async function loadSynth() {
   try {
     const info = await clientValue.loadSynth(synthMode.value, synthWithVis.value, synthCount.value)
     applyLoaded(info)
+    sourceName.value = '合成音频'
     status.value = `已载入合成音频（${info.duration.toFixed(1)}s）`
   } catch (error) {
     failJob(error)
@@ -128,10 +131,19 @@ async function loadSynth() {
   }
 }
 
+/** 打开选择框前清空原生 input：这样重复选择同一个文件也能触发 change，
+ *  同时选完后 input 会保留并显示所选文件名。 */
+function onFileClick(event: Event) {
+  ;(event.target as HTMLInputElement).value = ''
+}
+
 async function onFileChange(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file || !client.value || busy.value) return
+  // 立即记录所选文件名，避免原生 file input 被重置后无处显示。
+  const previousName = sourceName.value
+  sourceName.value = file.name
   beginJob(`正在解析 ${file.name}…`)
   try {
     const arrayBuffer = await file.arrayBuffer()
@@ -143,10 +155,12 @@ async function onFileChange(event: Event) {
     applyLoaded(info)
     status.value = `已载入 ${file.name}（${info.duration.toFixed(1)}s @ ${info.sampleRate} Hz）`
   } catch (error) {
+    // 载入失败：回退来源显示，保持与实际已载入音频一致。
+    sourceName.value = previousName
     failJob(error)
   } finally {
+    // 不再清空 input.value：保留原生 input 显示的文件名（见 onFileClick）。
     busy.value = false
-    input.value = ''
   }
 }
 
@@ -332,10 +346,19 @@ onBeforeUnmount(() => {
       <div class="row">
         <label class="file">
           选择音频文件
-          <input type="file" accept="audio/*" :disabled="busy" @change="onFileChange" />
+          <input
+            type="file"
+            accept="audio/*"
+            :disabled="busy"
+            @click="onFileClick"
+            @change="onFileChange"
+          />
         </label>
         <span class="hint">已载入 {{ durationText }}</span>
       </div>
+      <p class="source" :class="{ empty: !sourceName }" :title="sourceName">
+        <span class="source-label">当前音频：</span>{{ sourceName || '尚未选择' }}
+      </p>
       <details class="devtools">
         <summary>开发测试：生成合成音频</summary>
         <div class="row">
@@ -521,6 +544,21 @@ button:disabled {
 .hint {
   color: #8b98a5;
   font-size: 0.85rem;
+}
+/* 当前音频来源：长文件名截断并可用 title 查看完整名称。 */
+.source {
+  margin: 0 0 0.25rem;
+  color: #d7dee7;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.source-label {
+  color: #8b98a5;
+}
+.source.empty {
+  color: #6b7280;
 }
 .devtools {
   margin-top: 0.75rem;
