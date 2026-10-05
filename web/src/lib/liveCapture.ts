@@ -31,6 +31,73 @@ export async function listAudioInputs(): Promise<MediaDeviceInfo[]> {
   return devices.filter((device) => device.kind === 'audioinput')
 }
 
+/** 常见 App 内置浏览器（WebView）的 UA 特征——它们通常不提供麦克风接口。 */
+const IN_APP_BROWSER_UA =
+  /MicroMessenger|QQ\/|QQBrowser|Weibo|AlipayClient|DingTalk|Feishu|Lark|aweme|BytedanceMicroApp|FBAN|FBAV|Instagram|Line\//i
+
+/** 当前是否运行在 App 的内置浏览器（WebView）中。 */
+export function isInAppBrowser(): boolean {
+  return typeof navigator !== 'undefined' && IN_APP_BROWSER_UA.test(navigator.userAgent)
+}
+
+/**
+ * 返回「当前环境根本无法拿到麦克风」的可读原因；环境正常返回 `null`。
+ *
+ * 与权限成败无关：这里只判断浏览器是否**可能**弹窗（安全上下文、接口存在、
+ * 是否为内置 WebView），用于在界面提前给出可执行的指引，而不是等点击后报错。
+ */
+export function getMicEnvironmentIssue(): string | null {
+  if (typeof window !== 'undefined' && !window.isSecureContext) {
+    return '当前页面不是安全上下文（需要 HTTPS 或 localhost），浏览器不会开放麦克风。请改用 HTTPS 访问。'
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    if (isInAppBrowser()) {
+      return '检测到当前在 App 内置浏览器中打开，它通常不提供麦克风接口。请点右上角「···」选择「在浏览器打开」，改用系统 Safari / Chrome。'
+    }
+    return '当前浏览器未提供麦克风接口（可能版本过旧，或系统已禁用媒体设备）。请改用最新版 Safari / Chrome。'
+  }
+  return null
+}
+
+/**
+ * 查询麦克风权限状态。
+ *
+ * Permissions API 对 `microphone` 的支持有限（Safari 不支持），无法查询时返回 `'unknown'`。
+ */
+export async function queryMicPermission(): Promise<PermissionState | 'unknown'> {
+  try {
+    const status = await navigator.permissions?.query({
+      name: 'microphone' as PermissionName,
+    })
+    return status?.state ?? 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/** 把 `getUserMedia` 抛出的异常翻译成可执行的中文指引。 */
+export function describeMicError(error: unknown): string {
+  if (!(error instanceof DOMException)) {
+    return error instanceof Error ? error.message : String(error)
+  }
+  switch (error.name) {
+    case 'NotAllowedError':
+      return '麦克风权限被拒绝。若之前误点了「阻止」，浏览器不会再弹窗：请点地址栏的权限图标（或系统设置）允许本站使用麦克风，然后刷新页面重试。'
+    case 'NotFoundError':
+      return '未找到可用的麦克风设备，请确认设备已连接且未被停用。'
+    case 'NotReadableError':
+      return '无法读取麦克风：可能被其他应用占用，或被系统 / 隐私设置禁用。请关闭占用麦克风的应用后重试。'
+    case 'OverconstrainedError':
+      return '所选麦克风不可用（可能已拔出或设备标识失效），请点「刷新设备」后重试，或改用默认设备。'
+    case 'SecurityError':
+      return '出于安全原因浏览器阻止了麦克风访问，请确认使用 HTTPS 访问。'
+    case 'AbortError':
+      return '麦克风启动被中断，请重试。'
+    default:
+      return `麦克风启动失败：${error.name}${error.message ? `（${error.message}）` : ''}`
+  }
+}
+
 export class LiveCapture {
   private stream: MediaStream | null = null
   private context: AudioContext | null = null
@@ -53,18 +120,10 @@ export class LiveCapture {
     options: LiveCaptureOptions = {},
   ): Promise<number> {
     if (this.active) throw new Error('麦克风采集已在进行中')
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error('当前环境不支持麦克风采集（需要 HTTPS 或 localhost）')
-    }
+    const envIssue = getMicEnvironmentIssue()
+    if (envIssue) throw new Error(envIssue)
 
-    const audio: MediaTrackConstraints = {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false,
-      channelCount: 1,
-    }
-    if (options.deviceId) audio.deviceId = { exact: options.deviceId }
-    const stream = await navigator.mediaDevices.getUserMedia({ audio })
+    const stream = await this.requestStream(options)
     const track = stream.getAudioTracks()[0] ?? null
 
     const context = new AudioContext()
@@ -105,6 +164,39 @@ export class LiveCapture {
       stream.getTracks().forEach((track) => track.stop())
       await context.close().catch(() => undefined)
       throw error
+    }
+  }
+
+  /**
+   * 请求麦克风音频流：显式关闭回声消除 / 降噪 / 自动增益。
+   *
+   * 部分移动端浏览器 / 驱动会把基础约束当成严格约束，直接抛 `OverconstrainedError`
+   * （此时**不会弹权限框**）。因此逐级放宽：先去掉失效的设备约束，最后退化为
+   * 最宽松的 `{ audio: true }`；实际生效的约束由诊断面板显示。
+   */
+  private async requestStream(options: LiveCaptureOptions): Promise<MediaStream> {
+    const audio: MediaTrackConstraints = {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      channelCount: 1,
+    }
+    if (options.deviceId) audio.deviceId = { exact: options.deviceId }
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio })
+    } catch (error) {
+      if (!(error instanceof DOMException) || error.name !== 'OverconstrainedError') throw error
+      // 指定设备可能已失效（拔出 / deviceId 变化）：去掉后重试。
+      if (options.deviceId) {
+        delete audio.deviceId
+        try {
+          return await navigator.mediaDevices.getUserMedia({ audio })
+        } catch (retry) {
+          if (!(retry instanceof DOMException) || retry.name !== 'OverconstrainedError') throw retry
+        }
+      }
+      // 约束本身不被支持：退化为最宽松的音频请求。
+      return await navigator.mediaDevices.getUserMedia({ audio: true })
     }
   }
 

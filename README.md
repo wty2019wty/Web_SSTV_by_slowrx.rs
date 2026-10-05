@@ -15,6 +15,8 @@
 ├── rust-toolchain.toml        # 固定 Rust 1.95.0（含 wasm 目标）
 ├── .cargo/config.toml         # wasm32 开启 SIMD128
 ├── build-wasm.ps1             # 构建 wasm + 生成 JS 绑定
+├── node_env.ps1               # 启用项目内置 Node（仅当前会话；见下）
+├── .node-v24.19.0-win-x64/    # 便携版 Node.js 24（随项目放置，gitignore）
 ├── crates/slowrx/             # 内联的 slowrx 解码核心（原 fork 的 sstv-web 分支）
 │   └── src/decoder.rs         # 含新增的「渐进（实时）解码」模式
 ├── crates/slowrx-wasm/        # slowrx 的 WebAssembly 包装 crate
@@ -35,6 +37,7 @@
     │   └── App.vue
     └── scripts/
         ├── e2e.mjs            # 浏览器端到端测试（本机 Edge/Chrome，含实时接收）
+        ├── probe-mic.mjs      # 麦克风授权探针（确认是否真的调用了 getUserMedia）
         ├── bench.mjs          # 浏览器 V8 性能基准
         └── optimize-wasm.mjs  # binaryen（wasm-opt -Oz）体积优化
 ```
@@ -58,6 +61,9 @@ cargo install wasm-bindgen-cli --version 0.2.129 --locked
 ## 构建与运行
 
 ```powershell
+# 0) 启用项目内置 Node（每个新终端都要先执行一次，否则可能提示找不到 npm）
+. .\node_env.ps1
+
 # 1) 构建 wasm 并生成前端绑定（-Dev 启用合成测试音频）
 .\build-wasm.ps1 -Dev
 
@@ -110,6 +116,10 @@ node scripts\smoke.cjs
 # 浏览器端到端：Vite + 本机 Edge/Chrome，Worker 内解码后断言 Canvas 出图
 cd web
 npm run e2e
+
+# 麦克风授权探针：确认「开始接收」是否真的调用了 getUserMedia（含拒绝 / 已授权两条路径）
+npm run probe:mic
+$env:PROBE_FAKE_UI='1'; npm run probe:mic
 
 # 浏览器 V8 性能基准：各模式合成音频的解码耗时
 npm run bench

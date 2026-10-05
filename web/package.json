@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "typecheck": "vue-tsc --noEmit",
     "e2e": "node scripts/e2e.mjs",
+    "probe:mic": "node scripts/probe-mic.mjs",
     "bench": "node scripts/bench.mjs"
   },
   "dependencies": {

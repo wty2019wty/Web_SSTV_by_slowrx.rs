@@ -5,7 +5,13 @@
 // 解码选区（默认「自动识模」，可选具体模式强制解码）→ 结果画廊 + 逐张下载。
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import { DecoderClient } from './lib/decoderClient'
-import { LiveCapture, listAudioInputs } from './lib/liveCapture'
+import {
+  LiveCapture,
+  describeMicError,
+  getMicEnvironmentIssue,
+  listAudioInputs,
+  queryMicPermission,
+} from './lib/liveCapture'
 import type {
   DecodeEvent,
   ForcedAnchor,
@@ -66,6 +72,10 @@ const liveInfo = ref<LiveInfo | null>(null)
 const liveStatus = ref('未开始')
 const liveElapsed = ref(0)
 const liveImageCount = ref(0)
+/** 当前环境下麦克风是否不可用（安全上下文 / 接口缺失 / 内置浏览器）的原因，正常为 null。 */
+const micEnvIssue = ref<string | null>(null)
+/** 麦克风权限状态（Permissions API 不支持时为 unknown）。 */
+const micPermission = ref<PermissionState | 'unknown'>('unknown')
 const waterfall = ref<InstanceType<typeof WaterfallView> | null>(null)
 const liveImage = ref<InstanceType<typeof LiveImageView> | null>(null)
 const capture = shallowRef<LiveCapture | null>(null)
@@ -164,6 +174,7 @@ function selectSource(mode: 'file' | 'mic') {
   if (mode === sourceMode.value) return
   if (mode === 'file' && liveActive.value) void stopLiveReceive()
   sourceMode.value = mode
+  if (mode === 'mic') void checkMicEnvironment()
 }
 
 /** 重新枚举麦克风设备（首次授权后设备名才可用）。 */
@@ -175,6 +186,13 @@ async function refreshAudioInputs() {
   }
 }
 
+/** 检测麦克风运行环境（安全上下文 / 接口 / 内置 WebView）与权限状态。 */
+async function checkMicEnvironment() {
+  const issue = getMicEnvironmentIssue()
+  micEnvIssue.value = issue
+  micPermission.value = issue ? 'unknown' : await queryMicPermission()
+}
+
 /** 设备插拔时刷新列表。 */
 function onDeviceChange() {
   void refreshAudioInputs()
@@ -182,6 +200,19 @@ function onDeviceChange() {
 
 const isForced = computed(() => decodeMode.value !== 'auto')
 const synthModeInfo = computed(() => modes.value.find((m) => m.shortName === synthMode.value))
+/** 麦克风权限状态的中文描述，直接显示在界面上以便确认是否已授权。 */
+const micPermissionText = computed(() => {
+  switch (micPermission.value) {
+    case 'granted':
+      return '已允许'
+    case 'denied':
+      return '已拒绝（不会再自动弹窗）'
+    case 'prompt':
+      return '未授权（点「开始接收」时申请）'
+    default:
+      return '未知（该浏览器不支持查询）'
+  }
+})
 const durationText = computed(() =>
   loaded.value ? `${loaded.value.duration.toFixed(2)}s @ ${loaded.value.sampleRate} Hz` : '—',
 )
@@ -292,6 +323,7 @@ async function startLiveReceive() {
   if (!clientValue || liveBusy.value || liveActive.value) return
   liveBusy.value = true
   liveStatus.value = '正在请求麦克风…'
+  pushLog('正在请求麦克风权限…')
   livePendingChunks = []
   results.value = []
   liveImageCount.value = 0
@@ -317,6 +349,9 @@ async function startLiveReceive() {
       },
       { deviceId: selectedInputId.value || undefined },
     )
+    // 授权成功：清掉环境告警并记录权限状态。
+    micPermission.value = 'granted'
+    micEnvIssue.value = null
     // 实际生效的约束（浏览器可能覆盖请求；用于诊断 AGC/降噪是否被强开）。
     const settings = cap.settings()
     audioSettings.value = {
@@ -347,7 +382,14 @@ async function startLiveReceive() {
     pushLog(`开始实时接收：${sampleRate} Hz`)
   } catch (error) {
     await stopCapture()
-    liveStatus.value = `启动失败：${error instanceof Error ? error.message : String(error)}`
+    if (error instanceof DOMException && error.name === 'NotAllowedError') {
+      micPermission.value = 'denied'
+    }
+    const env = getMicEnvironmentIssue()
+    micEnvIssue.value = env
+    // 优先展示环境级原因（内置浏览器 / 非 HTTPS）；否则翻译 getUserMedia 异常。
+    liveStatus.value = `启动失败：${env ?? describeMicError(error)}`
+    pushLog(`麦克风启动失败：${error instanceof Error ? error.message : String(error)}`)
   } finally {
     liveBusy.value = false
   }
@@ -634,6 +676,7 @@ onMounted(async () => {
     status.value = `初始化失败：${error instanceof Error ? error.message : String(error)}`
   }
   await refreshAudioInputs()
+  await checkMicEnvironment()
   navigator.mediaDevices?.addEventListener('devicechange', onDeviceChange)
 })
 
@@ -747,12 +790,17 @@ onBeforeUnmount(() => {
             {{ liveActive ? '⏹ 停止接收' : '🎙 开始接收' }}
           </button>
           <button :disabled="liveBusy || liveActive" @click="refreshAudioInputs">刷新设备</button>
+          <span class="hint">权限：{{ micPermissionText }}</span>
           <span v-if="liveActive" class="hint">
             已接收 {{ liveElapsed.toFixed(1) }}s · 解出 {{ liveImageCount }} 张
           </span>
           <span v-else class="hint">从麦克风实时解码，边收边出图（自动识模）</span>
         </div>
-        <p v-if="audioInputs.length === 0" class="hint">
+        <p v-if="micEnvIssue" class="hint warn">{{ micEnvIssue }}</p>
+        <p v-else-if="micPermission === 'denied'" class="hint warn">
+          浏览器已拒绝本站的麦克风权限，不会再自动弹窗：请点地址栏的权限图标改为「允许」后刷新页面。
+        </p>
+        <p v-else-if="audioInputs.length === 0" class="hint">
           未检测到麦克风设备（或尚未授权）：首次点击「开始接收」会弹出麦克风授权。
         </p>
         <p class="live-status">{{ liveStatus }}</p>
@@ -821,7 +869,8 @@ onBeforeUnmount(() => {
         </div>
 
         <p class="hint">
-          需要 HTTPS 或 localhost；已请求关闭回声消除/降噪/自动增益，避免破坏 SSTV 信号。
+          需要 HTTPS 或 localhost；手机上请用系统浏览器（Safari / Chrome）打开，不要在微信 / QQ
+          等内置浏览器中使用。已请求关闭回声消除/降噪/自动增益，避免破坏 SSTV 信号。
           检测到 VIS 后会逐行绘制，整张收完（或点停止）再用完整同步重解一遍，
           结果同时加入下方「解码结果」画廊。
         </p>
