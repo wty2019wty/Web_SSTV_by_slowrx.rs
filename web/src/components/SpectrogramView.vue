@@ -427,6 +427,79 @@ function zoomBy(factor: number): void {
   setView(center - next / 2, center + next / 2)
 }
 
+// --- 横向滚动条 ---------------------------------------------------------
+// 显示完整时长与当前视口，可拖拽平移、拖两端缩放、点击空白处跳转。
+const scrollTrack = ref<HTMLDivElement | null>(null)
+type ScrollDrag = 'pan' | 'left' | 'right' | null
+let scrollDrag: ScrollDrag = null
+let scrollStartX = 0
+let scrollStartView = { t0: 0, t1: 0 }
+
+const viewportStyle = computed(() => {
+  const duration = totalDuration.value
+  const left = (view.value.t0 / duration) * 100
+  const width = ((view.value.t1 - view.value.t0) / duration) * 100
+  return { left: `${left}%`, width: `${Math.max(width, 0.6)}%` }
+})
+
+function scrollFraction(clientX: number): number {
+  const track = scrollTrack.value
+  if (!track) return 0
+  const rect = track.getBoundingClientRect()
+  return clamp((clientX - rect.left) / rect.width, 0, 1)
+}
+
+function onScrollPointerDown(e: PointerEvent): void {
+  const track = scrollTrack.value
+  if (!track) return
+  track.setPointerCapture(e.pointerId)
+  const duration = totalDuration.value
+  const fraction = scrollFraction(e.clientX)
+  const left = view.value.t0 / duration
+  const right = view.value.t1 / duration
+  const edge = 0.012
+  if (Math.abs(fraction - left) <= edge) {
+    scrollDrag = 'left'
+  } else if (Math.abs(fraction - right) <= edge) {
+    scrollDrag = 'right'
+  } else if (fraction > left && fraction < right) {
+    scrollDrag = 'pan'
+  } else {
+    const span = view.value.t1 - view.value.t0
+    const center = fraction * duration
+    setView(center - span / 2, center + span / 2)
+    scrollDrag = 'pan'
+  }
+  scrollStartX = e.clientX
+  scrollStartView = { ...view.value }
+}
+
+function onScrollPointerMove(e: PointerEvent): void {
+  const track = scrollTrack.value
+  if (!scrollDrag || !track) return
+  const rect = track.getBoundingClientRect()
+  const delta = ((e.clientX - scrollStartX) / rect.width) * totalDuration.value
+  const duration = totalDuration.value
+  const minSpan = duration / 500
+  if (scrollDrag === 'pan') {
+    const span = scrollStartView.t1 - scrollStartView.t0
+    const t0 = clamp(scrollStartView.t0 + delta, 0, Math.max(0, duration - span))
+    view.value = { t0, t1: t0 + span }
+  } else if (scrollDrag === 'left') {
+    const t0 = clamp(scrollStartView.t0 + delta, 0, view.value.t1 - minSpan)
+    view.value = { t0, t1: view.value.t1 }
+  } else {
+    const t1 = clamp(scrollStartView.t1 + delta, view.value.t0 + minSpan, duration)
+    view.value = { t1, t0: view.value.t0 }
+  }
+}
+
+function onScrollPointerUp(e: PointerEvent): void {
+  const track = scrollTrack.value
+  if (track?.hasPointerCapture(e.pointerId)) track.releasePointerCapture(e.pointerId)
+  scrollDrag = null
+}
+
 // --- 尺寸与生命周期 -----------------------------------------------------
 let observer: ResizeObserver | null = null
 
@@ -504,6 +577,17 @@ watch(
       <canvas ref="overlayCanvas" class="layer overlay" />
       <p v-if="!spectrogram" class="placeholder">载入音频后显示频谱图</p>
     </div>
+    <div
+      ref="scrollTrack"
+      class="scrollbar"
+      title="拖动平移，拖两端缩放，点击跳转"
+      @pointerdown="onScrollPointerDown"
+      @pointermove="onScrollPointerMove"
+      @pointerup="onScrollPointerUp"
+      @pointercancel="onScrollPointerUp"
+    >
+      <div class="viewport" :style="viewportStyle" />
+    </div>
   </div>
 </template>
 
@@ -566,5 +650,44 @@ watch(
   color: #6b7280;
   font-size: 0.85rem;
   margin: 0;
+}
+.scrollbar {
+  position: relative;
+  height: 14px;
+  margin-top: 6px;
+  background: #14161a;
+  border: 1px solid #2c3038;
+  border-radius: 7px;
+  touch-action: none;
+  cursor: pointer;
+}
+.viewport {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  background: rgba(79, 156, 249, 0.3);
+  border: 1px solid #4f9cf9;
+  border-radius: 7px;
+  cursor: grab;
+}
+.viewport:active {
+  cursor: grabbing;
+}
+.viewport::before,
+.viewport::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 2px;
+  background: #4f9cf9;
+  border-radius: 1px;
+}
+.viewport::before {
+  left: 3px;
+}
+.viewport::after {
+  right: 3px;
 }
 </style>

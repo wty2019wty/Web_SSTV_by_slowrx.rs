@@ -1,8 +1,9 @@
 // 浏览器端到端验证：启动 Vite 开发服务器，用本机 Edge/Chrome（puppeteer-core）
 // 驱动页面，验证：
 //   1. 生成合成音频后频谱图渲染出内容；
-//   2. VIS 自动识模解码选区出图；
-//   3. 强制模式（无 VIS）同样出图。
+//   2. 音频可播放（播放头推进）；
+//   3. 默认自动识模一次解出多张图（结果画廊）；
+//   4. 强制模式（锚点=开始 / 结束）各解出一张。
 //
 // 前置：.\\build-wasm.ps1 -Dev
 // 运行：cd web && npm run e2e
@@ -69,7 +70,33 @@ async function waitStatusContains(page, text, timeout) {
   )
 }
 
-/** 读取频谱底图（第一块 canvas）绘图区内的最大像素强度。 */
+/** 按选项文案定位并设置下拉框。 */
+async function selectByOptionText(page, optionText, value) {
+  await page.evaluate(
+    (needle, val) => {
+      const select = [...document.querySelectorAll('select')].find((s) =>
+        [...s.options].some((o) => o.textContent.includes(needle)),
+      )
+      if (!select) throw new Error(`未找到包含选项「${needle}」的下拉框`)
+      select.value = val
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    },
+    optionText,
+    value,
+  )
+}
+
+/** 设置合成图片数。 */
+async function setSynthCount(page, count) {
+  await page.evaluate((n) => {
+    const input = document.querySelector("input[type='number']")
+    if (!input) throw new Error('未找到图片数输入框')
+    input.value = String(n)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  }, count)
+}
+
+/** 读取频谱底图绘图区内的最大像素强度。 */
 async function spectrogramMax(page) {
   return page.evaluate(() => {
     const canvas = document.querySelector('.canvas-wrap canvas')
@@ -84,56 +111,38 @@ async function spectrogramMax(page) {
   })
 }
 
-/** 读取结果 canvas 的平均 R。 */
-async function resultMeanR(page) {
-  return page.evaluate(() => {
-    const canvas = document.querySelector('canvas.preview')
-    if (!canvas || !canvas.width) return -1
-    const data = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data
+/** 等待结果画廊出现恰好 n 张且图片已加载。 */
+async function waitForResults(page, expected, timeout = 180_000) {
+  await page.waitForFunction(
+    (n) => {
+      const imgs = document.querySelectorAll('.result img')
+      if (imgs.length !== n) return false
+      return [...imgs].every((img) => img.naturalWidth > 0)
+    },
+    { timeout, polling: 300 },
+    expected,
+  )
+}
+
+/** 读取第 index 张结果的尺寸与平均 R。 */
+async function resultInfo(page, index) {
+  return page.evaluate((i) => {
+    const img = document.querySelectorAll('.result img')[i]
+    if (!img) return null
+    const canvas = document.createElement('canvas')
+    canvas.width = img.naturalWidth
+    canvas.height = img.naturalHeight
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(img, 0, 0)
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data
     let sum = 0
     let n = 0
-    for (let i = 0; i < data.length; i += 4) {
-      sum += data[i]
+    for (let k = 0; k < data.length; k += 4) {
+      sum += data[k]
       n++
     }
-    return sum / n
-  })
-}
-
-/** 按索引切换复选框（0=synthWithVis，1=forcedMode）。 */
-async function toggleCheckbox(page, index) {
-  await page.evaluate((i) => {
-    const boxes = document.querySelectorAll('input[type=checkbox]')
-    boxes[i]?.click()
+    return { width: canvas.width, height: canvas.height, meanR: sum / n }
   }, index)
-}
-
-/** 设置强制模式锚点选择框（按选项文案定位）。 */
-async function selectAnchor(page, value) {
-  await page.evaluate((val) => {
-    const select = [...document.querySelectorAll('select')].find((s) =>
-      [...s.options].some((o) => o.textContent.includes('选区结束')),
-    )
-    if (!select) throw new Error('未找到锚点选择框')
-    select.value = val
-    select.dispatchEvent(new Event('change', { bubbles: true }))
-  }, value)
-}
-
-/** 触发解码并断言出图。 */
-async function decodeAndCheck(page, label) {
-  await clickButtonByText(page, '解码选区')
-  await page.waitForFunction(
-    () => {
-      const c = document.querySelector('canvas.preview')
-      return c && c.width === 640 && c.height === 496
-    },
-    { timeout: 180_000, polling: 500 },
-  )
-  const meanR = await resultMeanR(page)
-  check(meanR > 10, `${label}画布非全黑（平均 R ${meanR.toFixed(1)}）`)
-  const status = await page.$eval('.status', (el) => el.textContent ?? '')
-  check(status.includes('完成'), `${label}状态完成`)
 }
 
 try {
@@ -145,19 +154,17 @@ try {
 
   await page.goto(url, { waitUntil: 'networkidle0', timeout: 60_000 })
   await page.waitForFunction(
-    () => document.querySelector('select')?.options.length > 0,
+    () => [...document.querySelectorAll('select option')].some((o) => o.textContent.includes('自动识模')),
     { timeout: 60_000 },
   )
-  await page.evaluate(() => {
-    const select = document.querySelector('select')
-    select.value = 'pd120'
-    select.dispatchEvent(new Event('change', { bubbles: true }))
-  })
+  // 合成模式选 pd120，合成两张图。
+  await selectByOptionText(page, 'PD-120', 'pd120')
+  await setSynthCount(page, 2)
   console.log('模式列表已加载')
 
   // --- 生成合成音频 → 频谱图 ---
   await clickButtonByText(page, '生成合成音频')
-  await waitStatusContains(page, '已载入', 120_000)
+  await waitStatusContains(page, '已载入', 240_000)
   const maxIntensity = await spectrogramMax(page)
   console.log('频谱图最大强度：', maxIntensity)
   check(maxIntensity > 120, '频谱图渲染出高亮内容')
@@ -181,20 +188,42 @@ try {
   check(advanced, '播放头随时间推进（音频可播放）')
   await clickButtonByText(page, '⏸ 暂停')
 
-  // --- 自动识模解码选区 ---
-  await decodeAndCheck(page, '自动识模')
+  // --- 默认自动识模：一次解出多张 ---
+  await clickButtonByText(page, '解码选区')
+  await waitForResults(page, 2)
+  const first = await resultInfo(page, 0)
+  const second = await resultInfo(page, 1)
+  check(
+    first?.width === 640 && first?.height === 496,
+    `自动识模第 1 张 ${first?.width}×${first?.height}`,
+  )
+  check(
+    second?.width === 640 && second?.height === 496,
+    `自动识模第 2 张 ${second?.width}×${second?.height}`,
+  )
+  check((first?.meanR ?? 0) > 10 && (second?.meanR ?? 0) > 10, '两张图像均非全黑')
+  check((await page.$eval('.status', (el) => el.textContent))?.includes('完成'), '自动识模状态完成')
 
-  // --- 强制模式（合成无 VIS），锚点=选区开始 ---
-  await toggleCheckbox(page, 0) // 关闭“包含 VIS 头”
-  await clickButtonByText(page, '生成合成音频')
-  await waitStatusContains(page, '已载入', 120_000)
-  await toggleCheckbox(page, 1) // 打开“强制模式”
-  await selectAnchor(page, 'start')
-  await decodeAndCheck(page, '强制模式(锚点=开始)')
+  // --- 强制模式（锚点=选区开始）---
+  await selectByOptionText(page, '自动识模', 'pd120')
+  await page.waitForFunction(() =>
+    [...document.querySelectorAll('select option')].some((o) =>
+      o.textContent.includes('选区结束'),
+    ),
+  )
+  await selectByOptionText(page, '选区结束', 'start')
+  await clickButtonByText(page, '解码选区')
+  await waitForResults(page, 1)
+  const forcedStart = await resultInfo(page, 0)
+  check((forcedStart?.meanR ?? 0) > 10, `强制模式(锚点=开始)非全黑（平均 R ${forcedStart?.meanR.toFixed(1)}）`)
 
-  // --- 强制模式，锚点=选区结束 ---
-  await selectAnchor(page, 'end')
-  await decodeAndCheck(page, '强制模式(锚点=结束)')
+  // --- 强制模式（锚点=选区结束）---
+  await selectByOptionText(page, '选区结束', 'end')
+  await clickButtonByText(page, '解码选区')
+  await waitForResults(page, 1)
+  const forcedEnd = await resultInfo(page, 0)
+  check((forcedEnd?.meanR ?? 0) > 10, `强制模式(锚点=结束)非全黑（平均 R ${forcedEnd?.meanR.toFixed(1)}）`)
+  check((await page.$eval('.status', (el) => el.textContent))?.includes('完成'), '强制模式状态完成')
 } catch (error) {
   failures++
   console.error('E2E 异常：', error instanceof Error ? error.message : error)

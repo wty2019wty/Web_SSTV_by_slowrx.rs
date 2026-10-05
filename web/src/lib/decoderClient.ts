@@ -98,12 +98,13 @@ export class DecoderClient {
   }
 
   /** 载入 wasm 生成的合成音频（开发自测，需要 dev-synth 构建）。 */
-  async loadSynth(mode: string, withVis: boolean): Promise<LoadedInfo> {
+  async loadSynth(mode: string, withVis: boolean, count = 1): Promise<LoadedInfo> {
     const { message } = await this.request({
       type: 'loadSynth',
       requestId: this.nextId++,
       mode,
       withVis,
+      count,
     })
     if (message.type !== 'loaded') throw new Error('协议错误：期望 loaded')
     return message

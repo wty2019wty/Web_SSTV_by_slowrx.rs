@@ -2,10 +2,9 @@
 // Web SSTV 解码工具主界面。
 //
 // 流程：载入音频（文件 / 合成）→ Worker 计算频谱图 → 在频谱图上选时间段 →
-// 解码选区（自动识模或强制模式）→ Canvas 渲染 + 下载。
+// 解码选区（默认「自动识模」，可选具体模式强制解码）→ 结果画廊 + 逐张下载。
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import { DecoderClient } from './lib/decoderClient'
-import SpectrogramView from './components/SpectrogramView.vue'
 import type {
   DecodeEvent,
   ForcedAnchor,
@@ -13,29 +12,42 @@ import type {
   ModeInfo,
   TimeSelection,
 } from './lib/protocol'
+import SpectrogramView from './components/SpectrogramView.vue'
+
+/** 一张已解码图像。 */
+interface DecodedImage {
+  mode: string
+  width: number
+  height: number
+  dataUrl: string
+}
 
 const client = shallowRef<DecoderClient | null>(null)
 const modes = ref<ModeInfo[]>([])
-const selectedMode = ref('pd120')
-const forcedMode = ref(false) // false = VIS 自动识模；true = 按所选模式强制解码
-const forcedAnchor = ref<ForcedAnchor>('start') // 强制模式锚点：选区开始 / 结束
+/** 合成音频使用的模式。 */
+const synthMode = ref('pd120')
+/** 解码模式：`auto` = VIS 自动识模；其余为强制模式。 */
+const decodeMode = ref('auto')
+const forcedAnchor = ref<ForcedAnchor>('start')
 const synthWithVis = ref(true)
+/** 合成音频重复的图片数（用于验证多图自动识模）。 */
+const synthCount = ref(1)
 
 const loaded = ref<LoadedInfo | null>(null)
 const selection = ref<TimeSelection>({ start: 0, end: 1 })
+const results = ref<DecodedImage[]>([])
 
 const busy = ref(false)
 const status = ref('就绪')
 const progress = ref(0)
 const elapsedMs = ref<number | null>(null)
 const log = ref<string[]>([])
-const hasImage = ref(false)
 
-const canvasRef = ref<HTMLCanvasElement | null>(null)
 const playing = ref(false)
 const playhead = ref(0)
 
-const currentMode = computed(() => modes.value.find((m) => m.shortName === selectedMode.value))
+const isForced = computed(() => decodeMode.value !== 'auto')
+const synthModeInfo = computed(() => modes.value.find((m) => m.shortName === synthMode.value))
 const durationText = computed(() =>
   loaded.value ? `${loaded.value.duration.toFixed(2)}s @ ${loaded.value.sampleRate} Hz` : '—',
 )
@@ -54,7 +66,7 @@ function handleEvent(event: DecodeEvent) {
       pushLog(`未知 VIS 码：0x${event.code.toString(16)}`)
       break
     case 'image':
-      renderImage(event)
+      addResult(event)
       pushLog(`图像完成：${event.mode} ${event.width}×${event.height}`)
       break
     default:
@@ -62,26 +74,21 @@ function handleEvent(event: DecodeEvent) {
   }
 }
 
-function renderImage(event: Extract<DecodeEvent, { type: 'image' }>) {
-  const canvas = canvasRef.value
-  if (!canvas) return
+/** 把一张解码结果转成 PNG dataURL 存入画廊（自动模式可能一次得到多张）。 */
+function addResult(event: Extract<DecodeEvent, { type: 'image' }>) {
+  const canvas = document.createElement('canvas')
   canvas.width = event.width
   canvas.height = event.height
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   // 复制成带 ArrayBuffer 的 Uint8ClampedArray，满足 ImageData 的类型要求。
-  const clamped = new Uint8ClampedArray(event.rgba)
-  ctx.putImageData(new ImageData(clamped, event.width, event.height), 0, 0)
-  hasImage.value = true
-}
-
-function clearCanvas() {
-  const canvas = canvasRef.value
-  if (canvas) {
-    canvas.width = 0
-    canvas.height = 0
-  }
-  hasImage.value = false
+  ctx.putImageData(new ImageData(new Uint8ClampedArray(event.rgba), event.width, event.height), 0, 0)
+  results.value.push({
+    mode: event.mode,
+    width: event.width,
+    height: event.height,
+    dataUrl: canvas.toDataURL('image/png'),
+  })
 }
 
 function beginJob(message: string) {
@@ -93,7 +100,7 @@ function beginJob(message: string) {
 
 function endJob(result: { elapsedMs: number }) {
   elapsedMs.value = result.elapsedMs
-  status.value = `完成（${result.elapsedMs.toFixed(0)} ms）`
+  status.value = `完成（${result.elapsedMs.toFixed(0)} ms，${results.value.length} 张）`
   busy.value = false
 }
 
@@ -111,7 +118,7 @@ async function loadSynth() {
   if (!clientValue || busy.value) return
   beginJob('正在生成合成音频并计算频谱图…')
   try {
-    const info = await clientValue.loadSynth(selectedMode.value, synthWithVis.value)
+    const info = await clientValue.loadSynth(synthMode.value, synthWithVis.value, synthCount.value)
     applyLoaded(info)
     status.value = `已载入合成音频（${info.duration.toFixed(1)}s）`
   } catch (error) {
@@ -149,7 +156,7 @@ function applyLoaded(info: LoadedInfo) {
   loaded.value = info
   selection.value = { start: 0, end: info.duration }
   playhead.value = 0
-  clearCanvas()
+  results.value = []
 }
 
 async function decodeSelection() {
@@ -161,15 +168,15 @@ async function decodeSelection() {
     status.value = '选区为空'
     return
   }
-  clearCanvas()
-  beginJob('正在解码选区…')
+  results.value = []
+  beginJob(isForced.value ? '正在强制解码…' : '正在自动识模解码…')
   try {
     const result = await clientValue.decode(
       {
         startSample,
         endSample,
-        mode: forcedMode.value ? selectedMode.value : undefined,
-        anchor: forcedMode.value ? forcedAnchor.value : undefined,
+        mode: isForced.value ? decodeMode.value : undefined,
+        anchor: isForced.value ? forcedAnchor.value : undefined,
       },
       { onEvent: handleEvent, onProgress },
     )
@@ -177,20 +184,6 @@ async function decodeSelection() {
   } catch (error) {
     failJob(error)
   }
-}
-
-function download() {
-  const canvas = canvasRef.value
-  if (!canvas || !hasImage.value) return
-  canvas.toBlob((blob) => {
-    if (!blob) return
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `sstv-${Date.now()}.png`
-    anchor.click()
-    URL.revokeObjectURL(url)
-  })
 }
 
 /** 多声道取平均，得到单声道 f32。 */
@@ -300,7 +293,7 @@ onMounted(async () => {
   client.value = value
   try {
     modes.value = await value.listModes()
-    if (modes.value.length > 0) selectedMode.value = modes.value[0].shortName
+    if (modes.value.length > 0) synthMode.value = modes.value[0].shortName
     pushLog(`已加载 ${modes.value.length} 个模式`)
   } catch (error) {
     status.value = `初始化失败：${error instanceof Error ? error.message : String(error)}`
@@ -323,8 +316,8 @@ onBeforeUnmount(() => {
       <h2>1. 音频来源</h2>
       <div class="row">
         <label>
-          模式
-          <select v-model="selectedMode" :disabled="busy">
+          合成模式
+          <select v-model="synthMode" :disabled="busy">
             <option v-for="mode in modes" :key="mode.shortName" :value="mode.shortName">
               {{ mode.name }}（{{ mode.width }}×{{ mode.height }}）
             </option>
@@ -332,7 +325,11 @@ onBeforeUnmount(() => {
         </label>
         <label class="check">
           <input v-model="synthWithVis" type="checkbox" :disabled="busy" />
-          合成音频包含 VIS 头
+          包含 VIS 头
+        </label>
+        <label>
+          图片数
+          <input v-model.number="synthCount" type="number" min="1" max="20" :disabled="busy" />
         </label>
         <button :disabled="busy" @click="loadSynth">生成合成音频</button>
         <label class="file">
@@ -340,9 +337,11 @@ onBeforeUnmount(() => {
           <input type="file" accept="audio/*" :disabled="busy" @change="onFileChange" />
         </label>
       </div>
-      <p v-if="currentMode" class="hint">
-        {{ currentMode.name }} 标称图像时长约 {{ currentMode.imageSeconds.toFixed(1) }} 秒
-        · 已载入 {{ durationText }}
+      <p class="hint">
+        <template v-if="synthModeInfo">
+          {{ synthModeInfo.name }} 标称图像时长约 {{ synthModeInfo.imageSeconds.toFixed(1) }} 秒 ·
+        </template>
+        已载入 {{ durationText }}
       </p>
     </section>
 
@@ -366,11 +365,16 @@ onBeforeUnmount(() => {
     <section class="panel">
       <h2>3. 解码</h2>
       <div class="row">
-        <label class="check">
-          <input v-model="forcedMode" type="checkbox" :disabled="busy" />
-          强制模式（选区不含 VIS 头时使用）
+        <label>
+          解码模式
+          <select v-model="decodeMode" :disabled="busy">
+            <option value="auto">自动识模（推荐）</option>
+            <option v-for="mode in modes" :key="mode.shortName" :value="mode.shortName">
+              {{ mode.name }}
+            </option>
+          </select>
         </label>
-        <label v-if="forcedMode">
+        <label v-if="isForced">
           锚点
           <select v-model="forcedAnchor" :disabled="busy">
             <option value="start">选区开始（图像起点）</option>
@@ -378,10 +382,12 @@ onBeforeUnmount(() => {
           </select>
         </label>
         <button :disabled="busy || !loaded" @click="decodeSelection">解码选区</button>
-        <button :disabled="busy || !hasImage" @click="download">下载 PNG</button>
       </div>
-      <p v-if="forcedMode" class="hint">
-        强制模式只需一个锚点：解码长度由 {{ currentMode?.name }} 的标称时长决定，会从锚点一直读取到文件末尾。
+      <p v-if="isForced" class="hint">
+        强制模式只需一个锚点：长度由模式标称时长决定，会从锚点一直读取到文件末尾。
+      </p>
+      <p v-else class="hint">
+        自动识模会按选区范围内的 VIS 头依次解码，可能得到多张图像。
       </p>
       <p class="status">{{ status }}</p>
       <div class="progress"><div class="bar" :style="{ width: progress + '%' }" /></div>
@@ -389,8 +395,17 @@ onBeforeUnmount(() => {
     </section>
 
     <section class="panel">
-      <h2>4. 解码结果</h2>
-      <canvas ref="canvasRef" class="preview" />
+      <h2>4. 解码结果（{{ results.length }}）</h2>
+      <p v-if="results.length === 0" class="hint">暂无结果</p>
+      <div class="gallery">
+        <figure v-for="(image, index) in results" :key="index" class="result">
+          <img :src="image.dataUrl" :alt="`${image.mode} ${image.width}x${image.height}`" />
+          <figcaption>
+            <span>{{ image.mode }} · {{ image.width }}×{{ image.height }}</span>
+            <a :href="image.dataUrl" :download="`sstv-${index + 1}-${image.mode}.png`">下载</a>
+          </figcaption>
+        </figure>
+      </div>
     </section>
 
     <section class="panel">
@@ -446,12 +461,16 @@ label {
 }
 select,
 button,
-input[type='file'] {
+input[type='file'],
+input[type='number'] {
   background: #2b3038;
   color: inherit;
   border: 1px solid #3a4048;
   border-radius: 6px;
   padding: 0.35rem 0.6rem;
+}
+input[type='number'] {
+  width: 4.5rem;
 }
 button {
   cursor: pointer;
@@ -483,11 +502,35 @@ button:disabled {
   background: #4f9cf9;
   transition: width 0.1s linear;
 }
-.preview {
-  max-width: 100%;
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+.result {
+  margin: 0;
+  background: #14161a;
+  border: 1px solid #2c3038;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.result img {
+  display: block;
+  width: 100%;
   background: #000;
-  border-radius: 4px;
   image-rendering: pixelated;
+}
+.result figcaption {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.8rem;
+  color: #9fb3c8;
+}
+.result a {
+  color: #4f9cf9;
 }
 .log {
   margin: 0;

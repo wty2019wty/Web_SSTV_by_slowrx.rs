@@ -52,14 +52,19 @@ const FEED_CHUNK = 32768
 const PAD_SECONDS = 2.0
 
 /** 加载 dev-synth 才存在的合成音频导出（生产构建下给出明确提示）。 */
-async function synthAudio(mode: string, withVis: boolean): Promise<Float32Array> {
+async function synthAudio(mode: string, withVis: boolean, count: number): Promise<Float32Array> {
   const mod = (await import('../wasm/slowrx_wasm.js')) as typeof import('../wasm/slowrx_wasm.js') & {
     synthTestAudio?: (mode: string, withVis: boolean) => Float32Array
   }
   if (typeof mod.synthTestAudio !== 'function') {
     throw new Error('当前 wasm 构建不含合成音频工具（请用 build-wasm.ps1 -Dev 构建）')
   }
-  return mod.synthTestAudio(mode, withVis)
+  const single = mod.synthTestAudio(mode, withVis)
+  if (count <= 1) return single
+  // 重复拼接（每段都带自己的 VIS 头），供自动识模一次解出多张图。
+  const out = new Float32Array(single.length * count)
+  for (let i = 0; i < count; i++) out.set(single, i * single.length)
+  return out
 }
 
 function computeSpectrogramInfo(sampleRate: number, audio: Float32Array): SpectrogramInfo {
@@ -173,7 +178,7 @@ ctx.onmessage = async (e: MessageEvent<MainToWorker>) => {
       }
       case 'loadSynth': {
         await ensureReady()
-        const audio = await synthAudio(message.mode, message.withVis)
+        const audio = await synthAudio(message.mode, message.withVis, message.count)
         await storeAndReport(message.requestId, 11025, audio)
         break
       }

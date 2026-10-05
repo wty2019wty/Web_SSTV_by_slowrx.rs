@@ -57,7 +57,7 @@ export type ForcedAnchor = 'start' | 'end'
 /** 主线程 -> Worker。 */
 export type MainToWorker =
   | { type: 'listModes'; requestId: number }
-  | { type: 'loadSynth'; requestId: number; mode: string; withVis: boolean }
+  | { type: 'loadSynth'; requestId: number; mode: string; withVis: boolean; count: number }
   | { type: 'loadAudio'; requestId: number; sampleRate: number; audio: Float32Array }
   | {
       type: 'decode'
