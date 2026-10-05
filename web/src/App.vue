@@ -5,14 +5,17 @@
 // 解码选区（默认「自动识模」，可选具体模式强制解码）→ 结果画廊 + 逐张下载。
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import { DecoderClient } from './lib/decoderClient'
+import { LiveCapture, listAudioInputs } from './lib/liveCapture'
 import type {
   DecodeEvent,
   ForcedAnchor,
+  LiveInfo,
   LoadedInfo,
   ModeInfo,
   TimeSelection,
 } from './lib/protocol'
 import SpectrogramView from './components/SpectrogramView.vue'
+import WaterfallView from './components/WaterfallView.vue'
 
 /** 一张已解码图像。 */
 interface DecodedImage {
@@ -47,6 +50,46 @@ const log = ref<string[]>([])
 
 const playing = ref(false)
 const playhead = ref(0)
+
+// --- 实时接收（麦克风） -------------------------------------------------
+// 常驻解码器 + 流式瀑布图都在 Worker 内；主线程只负责采集、转发与渲染。
+/** 音频来源：本地文件 / 麦克风（实时）。 */
+const sourceMode = ref<'file' | 'mic'>('file')
+const audioInputs = ref<MediaDeviceInfo[]>([])
+const selectedInputId = ref('')
+const liveActive = ref(false)
+const liveBusy = ref(false)
+const liveInfo = ref<LiveInfo | null>(null)
+const liveStatus = ref('未开始')
+const liveElapsed = ref(0)
+const liveImageCount = ref(0)
+const waterfall = ref<InstanceType<typeof WaterfallView> | null>(null)
+const capture = shallowRef<LiveCapture | null>(null)
+let liveTimer = 0
+let liveStartedAt = 0
+/** 采集早于实时会话建立时暂存的音频块，会话建立后补投，避免丢掉开头。 */
+let livePendingChunks: Float32Array[] = []
+
+/** 切换音频来源；离开麦克风时停止正在进行的接收。 */
+function selectSource(mode: 'file' | 'mic') {
+  if (mode === sourceMode.value) return
+  if (mode === 'file' && liveActive.value) void stopLiveReceive()
+  sourceMode.value = mode
+}
+
+/** 重新枚举麦克风设备（首次授权后设备名才可用）。 */
+async function refreshAudioInputs() {
+  const devices = await listAudioInputs()
+  audioInputs.value = devices
+  if (!devices.some((device) => device.deviceId === selectedInputId.value)) {
+    selectedInputId.value = devices[0]?.deviceId ?? ''
+  }
+}
+
+/** 设备插拔时刷新列表。 */
+function onDeviceChange() {
+  void refreshAudioInputs()
+}
 
 const isForced = computed(() => decodeMode.value !== 'auto')
 const synthModeInfo = computed(() => modes.value.find((m) => m.shortName === synthMode.value))
@@ -115,6 +158,100 @@ function onProgress(fed: number, total: number) {
   progress.value = total > 0 ? Math.round((fed / total) * 100) : 0
 }
 
+// --- 实时接收（麦克风） -------------------------------------------------
+
+/** 实时解码事件：图像计入实时计数，其余复用文件解码的事件处理。 */
+function handleLiveEvent(event: DecodeEvent) {
+  if (event.type === 'image') liveImageCount.value++
+  handleEvent(event)
+}
+
+/** 采集到一块音频：会话已建立就转发给 Worker，否则暂存待补投。 */
+function onLiveChunk(samples: Float32Array) {
+  const clientValue = client.value
+  if (!clientValue) return
+  if (liveActive.value) clientValue.pushLive(samples)
+  else livePendingChunks.push(samples)
+}
+
+/** 停止并释放麦克风采集。 */
+async function stopCapture() {
+  window.clearInterval(liveTimer)
+  liveTimer = 0
+  const cap = capture.value
+  capture.value = null
+  if (cap) await cap.stop().catch(() => undefined)
+}
+
+async function startLiveReceive() {
+  const clientValue = client.value
+  if (!clientValue || liveBusy.value || liveActive.value) return
+  liveBusy.value = true
+  liveStatus.value = '正在请求麦克风…'
+  livePendingChunks = []
+  results.value = []
+  liveImageCount.value = 0
+  try {
+    const cap = new LiveCapture()
+    capture.value = cap
+    const sampleRate = await cap.start(
+      {
+        onChunk: onLiveChunk,
+        onError: (error) => pushLog(`采集错误：${error.message}`),
+      },
+      { deviceId: selectedInputId.value || undefined },
+    )
+    // 首次授权后设备名才可见，刷新一次下拉选项。
+    void refreshAudioInputs()
+    const info = await clientValue.startLive(sampleRate, {
+      onColumns: (columns, count) => waterfall.value?.push(columns, count),
+      onEvent: handleLiveEvent,
+    })
+    liveInfo.value = info
+    liveActive.value = true
+    liveStartedAt = performance.now()
+    liveElapsed.value = 0
+    liveTimer = window.setInterval(() => {
+      liveElapsed.value = (performance.now() - liveStartedAt) / 1000
+    }, 250)
+    // 补投建立会话前暂存的音频块（会话建立通常只需几毫秒）。
+    for (const chunk of livePendingChunks) clientValue.pushLive(chunk)
+    livePendingChunks = []
+    liveStatus.value = `实时接收中（${sampleRate} Hz，${(info.secondsPerColumn * 1000).toFixed(0)} ms/列）`
+    pushLog(`开始实时接收：${sampleRate} Hz`)
+  } catch (error) {
+    await stopCapture()
+    liveStatus.value = `启动失败：${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    liveBusy.value = false
+  }
+}
+
+async function stopLiveReceive() {
+  const clientValue = client.value
+  if (!liveActive.value || !clientValue) return
+  liveBusy.value = true
+  try {
+    await stopCapture()
+    const summary = await clientValue.stopLive()
+    liveImageCount.value = summary.imageCount
+    liveStatus.value = `已停止：解出 ${summary.imageCount} 张，用时 ${(summary.elapsedMs / 1000).toFixed(1)}s`
+    pushLog(`停止实时接收：${summary.imageCount} 张`)
+  } catch (error) {
+    liveStatus.value = `停止失败：${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    liveActive.value = false
+    liveInfo.value = null
+    livePendingChunks = []
+    liveBusy.value = false
+  }
+}
+
+function toggleLiveReceive() {
+  if (liveActive.value) void stopLiveReceive()
+  else void startLiveReceive()
+}
+
 async function loadSynth() {
   const clientValue = client.value
   if (!clientValue || busy.value) return
@@ -175,7 +312,7 @@ function applyLoaded(info: LoadedInfo) {
 
 async function decodeSelection() {
   const clientValue = client.value
-  if (!clientValue || busy.value || !loaded.value) return
+  if (!clientValue || busy.value || liveActive.value || !loaded.value) return
   const rate = loaded.value.sampleRate
   // 强制模式直接用播放头位置当锚点；自动识模用范围选区。
   const anchorTime = playhead.value
@@ -327,11 +464,16 @@ onMounted(async () => {
   } catch (error) {
     status.value = `初始化失败：${error instanceof Error ? error.message : String(error)}`
   }
+  await refreshAudioInputs()
+  navigator.mediaDevices?.addEventListener('devicechange', onDeviceChange)
 })
 
 onBeforeUnmount(() => {
   finishPlayback()
+  window.clearInterval(liveTimer)
+  navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange)
   void audioContext?.close()
+  void capture.value?.stop()
   client.value?.dispose()
 })
 </script>
@@ -343,51 +485,120 @@ onBeforeUnmount(() => {
 
     <section class="panel">
       <h2>1. 音频来源</h2>
-      <div class="row">
-        <label class="file">
-          <span class="file-text">选择音频文件</span>
-          <input
-            type="file"
-            accept="audio/*"
-            :disabled="busy"
-            @click="onFileClick"
-            @change="onFileChange"
-          />
-        </label>
-        <span class="hint">已载入 {{ durationText }}</span>
+      <div class="row source-tabs" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          :class="{ active: sourceMode === 'file' }"
+          :disabled="liveActive"
+          @click="selectSource('file')"
+        >
+          📁 本地文件
+        </button>
+        <button
+          type="button"
+          role="tab"
+          :class="{ active: sourceMode === 'mic' }"
+          :disabled="busy"
+          @click="selectSource('mic')"
+        >
+          🎙 麦克风
+        </button>
       </div>
-      <p class="source" :class="{ empty: !sourceName }" :title="sourceName">
-        <span class="source-label">当前音频：</span>{{ sourceName || '尚未选择' }}
-      </p>
-      <details class="devtools">
-        <summary>开发测试：生成合成音频</summary>
+
+      <template v-if="sourceMode === 'file'">
         <div class="row">
-          <label>
-            合成模式
-            <select v-model="synthMode" :disabled="busy">
-              <option v-for="mode in modes" :key="mode.shortName" :value="mode.shortName">
-                {{ mode.name }}（{{ mode.width }}×{{ mode.height }}）
+          <label class="file">
+            <span class="file-text">选择音频文件</span>
+            <input
+              type="file"
+              accept="audio/*"
+              :disabled="busy || liveActive"
+              @click="onFileClick"
+              @change="onFileChange"
+            />
+          </label>
+          <span class="hint">已载入 {{ durationText }}</span>
+        </div>
+        <p class="source" :class="{ empty: !sourceName }" :title="sourceName">
+          <span class="source-label">当前音频：</span>{{ sourceName || '尚未选择' }}
+        </p>
+        <details class="devtools">
+          <summary>开发测试：生成合成音频</summary>
+          <div class="row">
+            <label>
+              合成模式
+              <select v-model="synthMode" :disabled="busy || liveActive">
+                <option v-for="mode in modes" :key="mode.shortName" :value="mode.shortName">
+                  {{ mode.name }}（{{ mode.width }}×{{ mode.height }}）
+                </option>
+              </select>
+            </label>
+            <label class="check">
+              <input v-model="synthWithVis" type="checkbox" :disabled="busy || liveActive" />
+              包含 VIS 头
+            </label>
+            <label>
+              图片数
+              <input
+                v-model.number="synthCount"
+                type="number"
+                min="1"
+                max="20"
+                :disabled="busy || liveActive"
+              />
+            </label>
+            <button :disabled="busy || liveActive" @click="loadSynth">生成合成音频</button>
+          </div>
+          <p class="hint">
+            用 slowrx 的合成编码器生成已知内容的 SSTV 音频，便于在没有真实录音时验证解码。
+            <template v-if="synthModeInfo">
+              {{ synthModeInfo.name }} 标称图像时长约 {{ synthModeInfo.imageSeconds.toFixed(1) }} 秒。
+            </template>
+            需要 dev-synth 构建（<code>npm run wasm</code>），生产构建下不可用。
+          </p>
+        </details>
+      </template>
+
+      <template v-else>
+        <div class="row">
+          <label v-if="audioInputs.length > 0">
+            输入设备
+            <select v-model="selectedInputId" :disabled="liveActive || liveBusy">
+              <option
+                v-for="device in audioInputs"
+                :key="device.deviceId"
+                :value="device.deviceId"
+              >
+                {{ device.label || '麦克风（未授权，设备名不可见）' }}
               </option>
             </select>
           </label>
-          <label class="check">
-            <input v-model="synthWithVis" type="checkbox" :disabled="busy" />
-            包含 VIS 头
-          </label>
-          <label>
-            图片数
-            <input v-model.number="synthCount" type="number" min="1" max="20" :disabled="busy" />
-          </label>
-          <button :disabled="busy" @click="loadSynth">生成合成音频</button>
+          <button :disabled="liveBusy || busy" @click="toggleLiveReceive">
+            {{ liveActive ? '⏹ 停止接收' : '🎙 开始接收' }}
+          </button>
+          <button :disabled="liveBusy || liveActive" @click="refreshAudioInputs">刷新设备</button>
+          <span v-if="liveActive" class="hint">
+            已接收 {{ liveElapsed.toFixed(1) }}s · 解出 {{ liveImageCount }} 张
+          </span>
+          <span v-else class="hint">从麦克风实时解码，边收边出图（自动识模）</span>
         </div>
-        <p class="hint">
-          用 slowrx 的合成编码器生成已知内容的 SSTV 音频，便于在没有真实录音时验证解码。
-          <template v-if="synthModeInfo">
-            {{ synthModeInfo.name }} 标称图像时长约 {{ synthModeInfo.imageSeconds.toFixed(1) }} 秒。
-          </template>
-          需要 dev-synth 构建（<code>npm run wasm</code>），生产构建下不可用。
+        <p v-if="audioInputs.length === 0" class="hint">
+          未检测到麦克风设备（或尚未授权）：首次点击「开始接收」会弹出麦克风授权。
         </p>
-      </details>
+        <p class="live-status">{{ liveStatus }}</p>
+        <WaterfallView
+          ref="waterfall"
+          :bins="liveInfo?.bins ?? 0"
+          :max-hz="liveInfo?.maxHz ?? 4000"
+          :seconds-per-column="liveInfo?.secondsPerColumn ?? 0"
+          :active="liveActive"
+        />
+        <p class="hint">
+          需要 HTTPS 或 localhost；已关闭回声消除/降噪/自动增益，避免破坏 SSTV 信号。
+          接收到的图像会加入下方「解码结果」画廊。
+        </p>
+      </template>
     </section>
 
     <section class="panel">
@@ -427,7 +638,7 @@ onBeforeUnmount(() => {
             <option value="end">选区结束（图像数据末尾）</option>
           </select>
         </label>
-        <button :disabled="busy || !loaded" @click="decodeSelection">解码选区</button>
+        <button :disabled="busy || !loaded || liveActive" @click="decodeSelection">解码选区</button>
       </div>
       <p v-if="isForced" class="hint">
         直接用播放头当锚点：在频谱图上点击/拖拽（或播放到某处暂停）把播放头放到
@@ -509,6 +720,12 @@ h2 {
   align-items: center;
   margin-bottom: 0.75rem;
 }
+/* 音频来源切换（文件 / 麦克风）。 */
+.source-tabs button.active {
+  background: #2f6fbc;
+  border-color: #4f9cf9;
+  color: #fff;
+}
 label {
   display: flex;
   gap: 0.4rem;
@@ -551,6 +768,11 @@ button:disabled {
   accent-color: #4f9cf9;
 }
 .status {
+  margin: 0.25rem 0;
+  color: #cbd5e1;
+}
+/* 实时接收状态：独立于解码面板的 .status，避免 e2e/查询选中错误的元素。 */
+.live-status {
   margin: 0.25rem 0;
   color: #cbd5e1;
 }

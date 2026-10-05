@@ -21,14 +21,17 @@
 │       └── lib.rs             # #[wasm_bindgen] 绑定层
 ├── scripts/smoke.cjs          # Node 冒烟测试（加载 wasm 解码合成音频）
 └── web/                       # Vite + Vue 3 前端
+    ├── public/
+    │   └── live-capture.worklet.js     # 麦克风采集 AudioWorklet（原样拷贝）
     ├── src/
-    │   ├── workers/decoder.worker.ts   # 解码 Worker（wasm 在这里运行）
+    │   ├── workers/decoder.worker.ts   # 解码 / 频谱 / 实时接收（wasm 在这里运行）
     │   ├── components/SpectrogramView.vue
-    │   ├── lib/{protocol,decoderClient}.ts
+    │   ├── components/WaterfallView.vue # 实时接收的滚动瀑布图
+    │   ├── lib/{protocol,decoderClient,liveCapture,colorMap}.ts
     │   ├── wasm/              # 构建产物（gitignore，由 build-wasm.ps1 生成）
     │   └── App.vue
     └── scripts/
-        ├── e2e.mjs            # 浏览器端到端测试（本机 Edge/Chrome）
+        ├── e2e.mjs            # 浏览器端到端测试（本机 Edge/Chrome，含实时接收）
         ├── bench.mjs          # 浏览器 V8 性能基准
         └── optimize-wasm.mjs  # binaryen（wasm-opt -Oz）体积优化
 ```
@@ -63,7 +66,7 @@ npm run dev
 ```
 
 打开 <http://127.0.0.1:5173/>，选择模式后点“生成合成音频”，在频谱图上拖拽选区后点“解码选区”，
-或“选择音频文件”载入本地录音。
+或“选择音频文件”载入本地录音；也可以点“开始接收”用麦克风实时接收（需 HTTPS/localhost）。
 
 > 根目录的 `package.json` 只是脚本入口（`npm run dev` / `build` / `e2e` / `wasm` 等会委托到
 > `web/`）。前端项目本体在 `web/`，也可以 `cd web` 后直接用 `npm run dev`。
@@ -143,6 +146,9 @@ npm run bench
 - [x] **M7** V8 性能收尾：浏览器实测各模式耗时（V8 ≈ Cranelift）；`panic=abort`+`strip`
   + binaryen `wasm-opt -Oz` 把 wasm 从 1055 KB 压到 **683 KB（-35%）**；`PIXEL_FFT_STRIDE`
   无需调整
+- [x] **M8** 实时接收（麦克风）：`getUserMedia` → `AudioWorklet`（已关闭回声消除/降噪/
+  自动增益）→ Worker 内**常驻解码器**（自动识模）+ **流式 STFT 瀑布图**，边收边出图；
+  采集/接收的 PCM 全部在本机内存中，不上传
 
 ## 设计要点
 
@@ -166,3 +172,10 @@ npm run bench
   （gzip 193 KB），dev-synth 版约 683 KB；`build-wasm.ps1 -NoOpt` 可跳过优化。
 - 性能：浏览器 V8 与 wasmtime(Cranelift) 基本持平；PD120≈5.9 s、PD180≈7.6 s、
   PD240≈9.1 s（SIMD128）。详见上面的基准表。
+- 实时接收（方案 4.1 的约束）：解码仍是「两遍式」，一张图要收满约一整张的音频后
+  才爆发式计算，因此首图延迟≈图像时长（PD120 约 124 s、Robot36 约 36 s），且解码
+  突发（PD 约 6–9 s）期间瀑布图会短暂停顿后追帧。发送端按实时速率发射，CPU 仍有
+  充足余量，故实时接收整体流畅。
+- 实时瀑布图由 wasm 侧新增的**流式 STFT**（`StreamingSpectrogram`，复用 rustfft）
+  增量输出新列，与离线频谱图使用同一套加窗/归一化（有单元测试保证逐字节一致）；
+  主线程用离屏画布自滚动渲染，1 列 = 1 像素。

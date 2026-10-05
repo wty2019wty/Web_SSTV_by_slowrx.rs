@@ -54,6 +54,25 @@ export interface LoadedInfo {
 /** 强制模式的锚点端点：选区开始或结束（方案 4.2/6.5）。 */
 export type ForcedAnchor = 'start' | 'end'
 
+/** 实时接收会话建立后，Worker 回传的频谱参数。 */
+export interface LiveInfo {
+  sampleRate: number
+  /** 每列的频率 bin 数。 */
+  bins: number
+  /** 帧移（输入采样点）。 */
+  hop: number
+  /** 每列代表的时间跨度（秒）。 */
+  secondsPerColumn: number
+  /** 显示上限频率（Hz）。 */
+  maxHz: number
+}
+
+/** 实时接收会话结束时的小结。 */
+export interface LiveSummary {
+  elapsedMs: number
+  imageCount: number
+}
+
 /** 主线程 -> Worker。 */
 export type MainToWorker =
   | { type: 'listModes'; requestId: number }
@@ -70,6 +89,9 @@ export type MainToWorker =
       /** 强制模式的锚点端点，默认 `start`。 */
       anchor?: ForcedAnchor
     }
+  | { type: 'liveStart'; requestId: number; sampleRate: number }
+  | { type: 'livePush'; requestId: number; samples: Float32Array }
+  | { type: 'liveStop'; requestId: number }
 
 /** Worker -> 主线程。 */
 export type WorkerToMain =
@@ -78,4 +100,16 @@ export type WorkerToMain =
   | { type: 'event'; requestId: number; event: DecodeEvent }
   | { type: 'progress'; requestId: number; fedSamples: number; totalSamples: number }
   | { type: 'done'; requestId: number; elapsedMs: number }
+  | ({ type: 'liveStarted'; requestId: number } & LiveInfo)
+  | {
+      type: 'liveColumns'
+      requestId: number
+      /** 本批新列（列优先 8 位强度，长度 `count * bins`）。 */
+      columns: Uint8Array
+      /** 该批首列的累计列号（用于诊断/对位）。 */
+      firstColumn: number
+      count: number
+      bins: number
+    }
+  | ({ type: 'liveStopped'; requestId: number } & LiveSummary)
   | { type: 'error'; requestId: number; message: string }

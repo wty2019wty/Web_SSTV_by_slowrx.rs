@@ -247,6 +247,87 @@ impl Spectrogram {
     }
 }
 
+/// 流式 STFT（实时接收时的滚动瀑布图）。
+///
+/// 与 [`Spectrogram`] 使用相同的加窗与归一化；按块 `push` 音频，只返回本批
+/// **新产生的**频谱列，避免为持续数分钟的实时流反复重算整段。
+#[wasm_bindgen]
+pub struct StreamingSpectrogram {
+    inner: spectrogram::StreamingSpectrogram,
+}
+
+#[wasm_bindgen]
+impl StreamingSpectrogram {
+    /// 构造流式 STFT。`fft_size`、`hop`、`max_hz` 传 0 时使用默认值。
+    ///
+    /// # Errors
+    /// 参数非法时抛出错误。
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        sample_rate: u32,
+        fft_size: u32,
+        hop: u32,
+        max_hz: f64,
+    ) -> Result<StreamingSpectrogram, JsValue> {
+        let fft_size = if fft_size == 0 {
+            spectrogram::DEFAULT_FFT_SIZE
+        } else {
+            fft_size as usize
+        };
+        let hop = if hop == 0 {
+            // 实时默认 50% 重叠：列更少、滚动更平滑，且频率分辨率不变。
+            fft_size / 2
+        } else {
+            hop as usize
+        };
+        let max_hz = if max_hz <= 0.0 {
+            spectrogram::DEFAULT_MAX_HZ
+        } else {
+            max_hz
+        };
+        spectrogram::StreamingSpectrogram::new(sample_rate, fft_size, hop, max_hz)
+            .map(|inner| StreamingSpectrogram { inner })
+            .ok_or_else(|| JsValue::from_str("流式频谱图参数非法"))
+    }
+
+    /// 推入一段音频，返回本批新产生的频谱列（列优先 8 位强度，长度
+    /// `新列数 × bins`）。不足一帧时返回空数组。
+    pub fn push(&mut self, samples: &[f32]) -> js_sys::Uint8Array {
+        let columns = self.inner.push(samples);
+        js_sys::Uint8Array::from(columns.as_slice())
+    }
+
+    /// 每列的频率 bin 数。
+    #[wasm_bindgen(getter)]
+    pub fn bins(&self) -> u32 {
+        self.inner.bins()
+    }
+
+    /// 帧移（输入采样点）。
+    #[wasm_bindgen(getter)]
+    pub fn hop(&self) -> u32 {
+        self.inner.hop()
+    }
+
+    /// 输入采样率。
+    #[wasm_bindgen(getter, js_name = sampleRate)]
+    pub fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    /// 显示上限频率（Hz）。
+    #[wasm_bindgen(getter, js_name = maxHz)]
+    pub fn max_hz(&self) -> f64 {
+        self.inner.max_hz()
+    }
+
+    /// 每列代表的时间跨度（秒）。
+    #[wasm_bindgen(getter, js_name = secondsPerColumn)]
+    pub fn seconds_per_column(&self) -> f64 {
+        self.inner.seconds_per_column()
+    }
+}
+
 /// 计算 STFT 频谱图（在 Worker 内调用）。
 ///
 /// # Errors
