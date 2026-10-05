@@ -447,10 +447,17 @@ onBeforeUnmount(() => {
   max-width: 1000px;
   margin: 0 auto;
   padding: 1.5rem;
+  padding-left: calc(1.5rem + env(safe-area-inset-left));
+  padding-right: calc(1.5rem + env(safe-area-inset-right));
+  padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));
+  box-sizing: border-box;
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
   color: #e6e6e6;
   background: #16181d;
   min-height: 100vh;
+  min-height: 100dvh;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 h1 {
   font-size: 1.5rem;
@@ -582,5 +589,61 @@ button:disabled {
   font-size: 0.82rem;
   max-height: 200px;
   overflow: auto;
+}
+
+/* --- 移动端 / 窄屏适配 ------------------------------------------------ */
+@media (max-width: 720px) {
+  .app {
+    padding: 1rem;
+    padding-left: calc(1rem + env(safe-area-inset-left));
+    padding-right: calc(1rem + env(safe-area-inset-right));
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 600px) {
+  .app {
+    padding: 0.75rem;
+    padding-left: calc(0.75rem + env(safe-area-inset-left));
+    padding-right: calc(0.75rem + env(safe-area-inset-right));
+    padding-bottom: calc(0.75rem + env(safe-area-inset-bottom));
+  }
+  h1 {
+    font-size: 1.25rem;
+  }
+  .subtitle {
+    font-size: 0.88rem;
+  }
+  .panel {
+    padding: 0.75rem;
+    border-radius: 10px;
+  }
+  .row {
+    gap: 0.6rem;
+  }
+  /* 触控友好的控件尺寸；input 字号 <16px 时 iOS 聚焦会自动放大页面。 */
+  select,
+  button,
+  input[type='number'],
+  input[type='file'] {
+    min-height: 44px;
+    font-size: 16px;
+  }
+  label {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .row button {
+    flex: 1 1 auto;
+  }
+  .result figcaption {
+    font-size: 0.78rem;
+  }
+  .gallery {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+  .log {
+    max-height: 160px;
+  }
 }
 </style>

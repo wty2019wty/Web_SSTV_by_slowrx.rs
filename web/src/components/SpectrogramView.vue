@@ -23,16 +23,38 @@ const emit = defineEmits<{ seek: [time: number] }>()
 
 const selection = defineModel<TimeSelection>({ required: true })
 
-// 画布内边距（像素）。
-const LEFT = 46
-const RIGHT = 10
-const TOP = 8
-const BOTTOM = 18
-const HEIGHT = 250
-// 命中选区的边缘阈值（像素）。
+// 画布内边距（像素）。会随容器宽度自适应：窄屏收窄频率轴、降低画布高度。
+let LEFT = 46
+let RIGHT = 10
+let TOP = 8
+let BOTTOM = 18
+/** 画布高度（像素，响应式，供模板绑定）。 */
+const canvasHeight = ref(250)
+// 命中选区的边缘阈值（像素）：鼠标精确、手指需要更大容差。
 const EDGE_PX = 6
+const TOUCH_EDGE_PX = 16
 // 选区最小跨度（秒）。
 const MIN_SPAN = 0.1
+
+/** 依据容器宽度选择画布布局，避免窄屏下坐标轴挤压绘图区。 */
+function applyLayout(width: number): void {
+  if (width < 480) {
+    LEFT = 30
+    RIGHT = 6
+    BOTTOM = 16
+    canvasHeight.value = 180
+  } else if (width < 720) {
+    LEFT = 38
+    RIGHT = 8
+    BOTTOM = 17
+    canvasHeight.value = 210
+  } else {
+    LEFT = 46
+    RIGHT = 10
+    BOTTOM = 18
+    canvasHeight.value = 250
+  }
+}
 
 const root = ref<HTMLDivElement | null>(null)
 const baseCanvas = ref<HTMLCanvasElement | null>(null)
@@ -308,16 +330,74 @@ type Drag =
 let drag: Drag | null = null
 let previousSelection: TimeSelection = { start: 0, end: 1 }
 
-function localX(e: { clientX: number }): number {
+// 当前按下的指针（用于识别双指手势）。以 clientX/Y 记录，便于计算中点与间距。
+const activePointers = new Map<number, { x: number; y: number }>()
+// 双指手势：以手势开始时双指中点对应的时刻为锚点做缩放/平移。
+interface PinchGesture {
+  anchorTime: number
+  startSpan: number
+  startDist: number
+}
+let pinch: PinchGesture | null = null
+
+function localXFromClient(clientX: number): number {
   const rect = root.value!.getBoundingClientRect()
-  return e.clientX - rect.left
+  return clientX - rect.left
+}
+
+function localX(e: { clientX: number }): number {
+  return localXFromClient(e.clientX)
+}
+
+/** 命中阈值：手指比鼠标需要更大的容差。 */
+function edgeThreshold(pointerType: string): number {
+  return pointerType === 'touch' ? TOUCH_EDGE_PX : EDGE_PX
+}
+
+function pointerDistance(a: { x: number; y: number }, b: { x: number; y: number }): number {
+  return Math.hypot(a.x - b.x, a.y - b.y)
+}
+
+/** 开始双指手势：取消进行中的单指拖拽，记录锚点与初始间距。 */
+function beginPinch(): void {
+  const pts = [...activePointers.values()]
+  if (pts.length < 2) return
+  if (drag?.mode === 'create') selection.value = previousSelection
+  drag = null
+  const midX = (pts[0].x + pts[1].x) / 2
+  pinch = {
+    anchorTime: clamp(pxToTime(localXFromClient(midX)), 0, totalDuration.value),
+    startSpan: view.value.t1 - view.value.t0,
+    startDist: Math.max(1, pointerDistance(pts[0], pts[1])),
+  }
+}
+
+/** 双指捏合缩放 + 双指拖动平移：锚点时刻始终跟随双指中点。 */
+function updatePinch(): void {
+  if (!pinch || activePointers.size < 2) return
+  const pts = [...activePointers.values()]
+  const dist = Math.max(1, pointerDistance(pts[0], pts[1]))
+  const midX = localXFromClient((pts[0].x + pts[1].x) / 2)
+  const duration = totalDuration.value
+  // 手指张开（距离变大）→ 放大 → 视口跨度变小。
+  const span = clamp(pinch.startSpan * (pinch.startDist / dist), duration / 500, duration)
+  const t0 = pinch.anchorTime - ((midX - LEFT) / plotWidth()) * span
+  setView(t0, t0 + span)
 }
 
 function onPointerDown(e: PointerEvent): void {
   if (!props.spectrogram || !root.value) return
+  root.value.setPointerCapture(e.pointerId)
+  activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+
+  // 第二根手指落下：切换到双指手势（缩放 / 平移），不再创建选区。
+  if (activePointers.size >= 2) {
+    beginPinch()
+    return
+  }
+
   const x = localX(e)
   if (x < LEFT || x > baseCanvas.value!.width - RIGHT) return
-  root.value.setPointerCapture(e.pointerId)
   previousSelection = { ...selection.value }
 
   if (e.altKey || e.button === 1) {
@@ -333,11 +413,12 @@ function onPointerDown(e: PointerEvent): void {
     return
   }
 
+  const edge = edgeThreshold(e.pointerType)
   const sx = timeToPx(selection.value.start)
   const ex = timeToPx(selection.value.end)
-  if (Math.abs(x - sx) <= EDGE_PX) {
+  if (Math.abs(x - sx) <= edge) {
     drag = { mode: 'resize-start' }
-  } else if (Math.abs(x - ex) <= EDGE_PX) {
+  } else if (Math.abs(x - ex) <= edge) {
     drag = { mode: 'resize-end' }
   } else if (x > sx && x < ex) {
     drag = { mode: 'move', grab: t - selection.value.start }
@@ -349,10 +430,19 @@ function onPointerDown(e: PointerEvent): void {
 
 function onPointerMove(e: PointerEvent): void {
   if (!root.value || !baseCanvas.value) return
+  if (activePointers.has(e.pointerId)) {
+    activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+  }
+  // 双指手势优先。
+  if (activePointers.size >= 2) {
+    if (!pinch) beginPinch()
+    updatePinch()
+    return
+  }
   const x = localX(e)
   hoverX.value = x
   if (!drag) {
-    updateCursor(x)
+    updateCursor(x, e.pointerType)
     return
   }
   const duration = totalDuration.value
@@ -386,6 +476,18 @@ function onPointerMove(e: PointerEvent): void {
 }
 
 function onPointerUp(e: PointerEvent): void {
+  const wasPinching = pinch !== null
+  activePointers.delete(e.pointerId)
+  if (activePointers.size >= 2) return
+  if (wasPinching) {
+    // 双指手势结束：清除手势状态，等待剩余手指抬起，避免误触发单指拖拽。
+    pinch = null
+    drag = null
+    if (root.value?.hasPointerCapture(e.pointerId)) {
+      root.value.releasePointerCapture(e.pointerId)
+    }
+    return
+  }
   if (root.value?.hasPointerCapture(e.pointerId)) {
     root.value.releasePointerCapture(e.pointerId)
   }
@@ -409,16 +511,17 @@ function onPointerUp(e: PointerEvent): void {
   drag = null
 }
 
-function updateCursor(x: number): void {
+function updateCursor(x: number, pointerType = 'mouse'): void {
   const el = root.value
   if (!el) return
   if (props.interaction === 'playhead') {
     el.style.cursor = 'crosshair'
     return
   }
+  const edge = edgeThreshold(pointerType)
   const sx = timeToPx(selection.value.start)
   const ex = timeToPx(selection.value.end)
-  if (Math.abs(x - sx) <= EDGE_PX || Math.abs(x - ex) <= EDGE_PX) {
+  if (Math.abs(x - sx) <= edge || Math.abs(x - ex) <= edge) {
     el.style.cursor = 'ew-resize'
   } else if (x > sx && x < ex) {
     el.style.cursor = 'grab'
@@ -495,7 +598,8 @@ function onScrollPointerDown(e: PointerEvent): void {
   const fraction = scrollFraction(e.clientX)
   const left = view.value.t0 / duration
   const right = view.value.t1 / duration
-  const edge = 0.012
+  // 手指拖两端缩放需要更大的命中比例。
+  const edge = e.pointerType === 'touch' ? 0.03 : 0.012
   if (Math.abs(fraction - left) <= edge) {
     scrollDrag = 'left'
   } else if (Math.abs(fraction - right) <= edge) {
@@ -547,9 +651,10 @@ function resize(): void {
   const overlay = overlayCanvas.value
   if (!el || !base || !overlay) return
   const width = Math.max(240, Math.floor(el.clientWidth))
+  applyLayout(width)
   for (const canvas of [base, overlay]) {
     canvas.width = width
-    canvas.height = HEIGHT
+    canvas.height = canvasHeight.value
   }
   redrawAll()
 }
@@ -599,11 +704,15 @@ watch(
       <button type="button" :disabled="!spectrogram" @click="zoomBy(1 / 1.5)">放大</button>
       <button type="button" :disabled="!spectrogram" @click="zoomBy(1.5)">缩小</button>
       <span class="selection">{{ interaction === 'playhead' ? '' : '选区' }} {{ selectionText }}</span>
-      <span class="hint">滚轮缩放 · Shift+滚轮平移 · Alt/中键拖拽平移 · 下方滚动条可拖动/滚轮缩放</span>
+      <span class="hint hint-desktop">滚轮缩放 · Shift+滚轮平移 · Alt/中键拖拽平移 · 下方滚动条可拖动/滚轮缩放</span>
+      <span class="hint hint-touch">
+        {{ interaction === 'playhead' ? '单指拖动定位锚点 · 双指缩放/平移' : '单指拖拽选区 · 双指缩放/平移' }}
+      </span>
     </div>
     <div
       ref="root"
       class="canvas-wrap"
+      :style="{ height: canvasHeight + 'px' }"
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
@@ -661,6 +770,9 @@ watch(
   color: #6b7280;
   font-size: 0.75rem;
   margin-left: auto;
+}
+.hint-touch {
+  display: none;
 }
 .canvas-wrap {
   position: relative;
@@ -728,5 +840,37 @@ watch(
 }
 .viewport::after {
   right: 3px;
+}
+
+/* --- 触控 / 移动端适配 ------------------------------------------------ */
+@media (hover: none), (pointer: coarse), (max-width: 600px) {
+  .hint-desktop {
+    display: none;
+  }
+  .hint-touch {
+    display: inline;
+  }
+  .toolbar {
+    gap: 0.4rem;
+  }
+  .toolbar button {
+    min-height: 40px;
+    padding: 0.45rem 0.9rem;
+    font-size: 15px;
+  }
+  /* 加高滚动条，方便手指拖动与拖两端缩放。 */
+  .scrollbar {
+    height: 22px;
+    border-radius: 11px;
+  }
+  .viewport {
+    border-radius: 11px;
+  }
+  .viewport::before,
+  .viewport::after {
+    top: 5px;
+    bottom: 5px;
+    width: 3px;
+  }
 }
 </style>
