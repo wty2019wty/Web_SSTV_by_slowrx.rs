@@ -345,7 +345,7 @@ onBeforeUnmount(() => {
       <h2>1. 音频来源</h2>
       <div class="row">
         <label class="file">
-          选择音频文件
+          <span class="file-text">选择音频文件</span>
           <input
             type="file"
             accept="audio/*"
@@ -514,6 +514,19 @@ label {
   gap: 0.4rem;
   align-items: center;
 }
+/* 文件选择行：原生文件控件宽度不可压缩，允许换行并限制最大宽度，避免挤压标签文字或溢出面板。 */
+.file {
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.file-text {
+  white-space: nowrap;
+}
+.file input[type='file'] {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
 select,
 button,
 input[type='file'],
@@ -670,6 +683,20 @@ button:disabled {
   label {
     width: 100%;
     justify-content: space-between;
+  }
+  /* 窄屏下原生文件控件几乎占满一行，标签文字会被挤成竖排并溢出面板，
+     因此改为上下堆叠：标签独占一行，文件控件占满整行。 */
+  .file {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 0.35rem;
+    width: 100%;
+  }
+  .file input[type='file'] {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
   }
   .row button {
     flex: 1 1 auto;
