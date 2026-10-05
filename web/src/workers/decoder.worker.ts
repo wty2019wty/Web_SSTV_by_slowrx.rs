@@ -52,8 +52,6 @@ interface LiveSession {
   decoder: WasmDecoder
   spec: StreamingSpectrogram
   bins: number
-  /** 已产出的累计列数（用于给每批标注 firstColumn）。 */
-  columns: number
   images: number
   startedAt: number
 }
@@ -69,9 +67,15 @@ const LIVE_TARGET_BIN_HZ = 10.8
  * 例如 48 kHz → 4096 点（≈11.7 Hz/bin），11.025 kHz → 1024 点。
  */
 function pickLiveFftSize(sampleRate: number): number {
-  const target = Math.round(sampleRate / LIVE_TARGET_BIN_HZ)
-  let fft = 1024
-  while (fft < target && fft < 8192) fft <<= 1
+  const target = Math.max(1, Math.round(sampleRate / LIVE_TARGET_BIN_HZ))
+  const min = 1024
+  const max = 8192
+  // 先抬到「不大于 target 的最大 2 的幂」，再与相邻的更大一档比谁更接近
+  // target。直接取「第一个 ≥ target 的 2 的幂」会在 48 kHz（target≈4444）
+  // 越级到 8192，把 bin 宽度压到目标的一半。
+  let fft = min
+  while (fft < max && fft * 2 <= target) fft *= 2
+  if (fft < max && target - fft > fft * 2 - target) fft *= 2
   return fft
 }
 
@@ -216,7 +220,6 @@ function startLive(requestId: number, sampleRate: number): void {
     decoder,
     spec,
     bins: spec.bins,
-    columns: 0,
     images: 0,
     startedAt: performance.now(),
   }
@@ -247,10 +250,8 @@ function pushLive(requestId: number, samples: Float32Array): void {
   const columns = current.spec.push(samples)
   const count = columns.length / current.bins
   if (count > 0) {
-    const firstColumn = current.columns
-    current.columns += count
     post(
-      { type: 'liveColumns', requestId, columns, firstColumn, count, bins: current.bins },
+      { type: 'liveColumns', requestId, columns, count, bins: current.bins },
       [columns.buffer],
     )
   }

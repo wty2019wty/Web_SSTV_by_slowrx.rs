@@ -87,16 +87,18 @@ pub enum SstvEvent {
         /// in-progress image at emission time.
         pixels: Vec<[u8; 3]>,
     },
-    /// Image complete (`LineDecoded` for the final line was just emitted).
-    /// `partial` is reserved for future mid-image VIS handling — V1 always
-    /// emits `partial: false`. `reset()` discards in-flight images silently
-    /// without emitting any event.
+    /// Image complete (a `LineDecoded` for the final decoded row was just
+    /// emitted). `partial` is `true` when the image was flushed before every
+    /// row arrived — currently only [`SstvDecoder::finalize`] does this, for a
+    /// mid-stream stop of real-time reception; the rows that never arrived
+    /// stay black. Full-image decodes set `partial: false`. `reset()`
+    /// discards in-flight images silently without emitting any event.
     ImageComplete {
-        /// Final pixel buffer.
+        /// Final pixel buffer. When `partial` is `true`, un-decoded rows
+        /// remain the black-filled default.
         image: SstvImage,
-        /// Reserved for future mid-image VIS handling. V1 always sets this
-        /// to `false`. See the deferred mid-image VIS TODO in
-        /// [`SstvDecoder::process`] for details.
+        /// `true` when the image is incomplete (flushed early by
+        /// [`SstvDecoder::finalize`]); `false` for a full-image decode.
         partial: bool,
     },
 }
@@ -227,8 +229,10 @@ struct DecodingState {
     /// per-pixel demod so the pixel band shifts with radio tuning.
     hedr_shift_hz: f64,
     /// Total audio samples we must accumulate before running
-    /// [`find_sync`] and per-pair decode. Computed at state-entry as
-    /// `image_lines / 2 × line_seconds × FINDSYNC_AUDIO_HEADROOM × work_rate`.
+    /// [`find_sync`] and per-pair decode in the batch path. Computed at
+    /// state-entry as `radio_frames_per_image(spec) × line_seconds ×
+    /// FINDSYNC_AUDIO_HEADROOM × work_rate` (PD packs two image rows per
+    /// radio frame, so the frame count differs by channel layout).
     target_audio_samples: usize,
     /// Per-mode chroma planes side buffer.
     ///
@@ -1204,6 +1208,9 @@ impl SstvDecoder {
     ///
     /// 未在解码中、或 sync 尚不足以定位（`find_sync` 未找到任何 sync 脉冲）时
     /// 返回空，避免用瞎猜的 `skip` 解出垃圾图。
+    ///
+    /// 无论是否产出事件，调用后都会丢弃进行中的解码状态（复位为
+    /// `AwaitingVis`）；它是一次性的收尾操作。
     #[must_use]
     pub fn finalize(&mut self) -> Vec<SstvEvent> {
         let State::Decoding(d_box) = std::mem::replace(&mut self.state, State::AwaitingVis) else {

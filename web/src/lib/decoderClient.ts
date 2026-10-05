@@ -52,6 +52,8 @@ export class DecoderClient {
     null
   private liveStop: { resolve: (summary: LiveSummary) => void; reject: (error: Error) => void } | null =
     null
+  /** 已发出的停止请求；重复调用复用它，避免覆盖 `liveStop` 导致前一 Promise 永不结算。 */
+  private liveStopPromise: Promise<LiveSummary> | null = null
 
   constructor() {
     this.worker = new Worker(new URL('../workers/decoder.worker.ts', import.meta.url), {
@@ -140,6 +142,7 @@ export class DecoderClient {
     this.liveHandlers = null
     this.liveStart = null
     this.liveStop = null
+    this.liveStopPromise = null
   }
 
   private request(
@@ -227,14 +230,16 @@ export class DecoderClient {
     this.worker.postMessage({ type: 'livePush', requestId: this.liveId, samples }, [samples.buffer])
   }
 
-  /** 结束实时接收会话；返回本次用时与解出的图像数。 */
-  async stopLive(): Promise<LiveSummary> {
-    if (this.liveId === 0) return { elapsedMs: 0, imageCount: 0 }
+  /** 结束实时接收会话；返回本次用时与解出的图像数。重复调用复用同一请求。 */
+  stopLive(): Promise<LiveSummary> {
+    if (this.liveId === 0) return Promise.resolve({ elapsedMs: 0, imageCount: 0 })
+    if (this.liveStopPromise) return this.liveStopPromise
     const id = this.liveId
-    return new Promise<LiveSummary>((resolve, reject) => {
+    this.liveStopPromise = new Promise<LiveSummary>((resolve, reject) => {
       this.liveStop = { resolve, reject }
       this.worker.postMessage({ type: 'liveStop', requestId: id })
     })
+    return this.liveStopPromise
   }
 
   dispose(): void {

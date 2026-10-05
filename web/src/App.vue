@@ -761,7 +761,6 @@ onBeforeUnmount(() => {
           :bins="liveInfo?.bins ?? 0"
           :max-hz="liveInfo?.maxHz ?? 4000"
           :seconds-per-column="liveInfo?.secondsPerColumn ?? 0"
-          :active="liveActive"
         />
         <LiveImageView ref="liveImage" />
 

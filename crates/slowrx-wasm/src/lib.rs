@@ -149,6 +149,7 @@ impl WasmDecoder {
 
     /// 收尾：对进行中的图像做一次精修（用完整 sync 重解已到齐的行），
     /// 返回逐行事件与一张 `partial: true` 的 `image`。未在解码中时返回空数组。
+    /// 调用后丢弃进行中的解码状态（一次性收尾）。
     #[wasm_bindgen(js_name = finalize)]
     pub fn finalize(&mut self) -> js_sys::Array {
         let events = self.inner.finalize();

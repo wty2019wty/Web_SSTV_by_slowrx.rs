@@ -158,6 +158,7 @@ impl CoreDecoder {
 
     /// 收尾：对进行中的图像做一次精修（用已收集的完整 sync 重解已到齐的行），
     /// 发出逐行事件与一张 `partial` 图。未在解码中时返回空。
+    /// 无论是否产出事件，调用后都会丢弃进行中的解码状态。
     pub fn finalize(&mut self) -> Vec<CoreEvent> {
         let emit_lines = self.emit_lines;
         self.decoder

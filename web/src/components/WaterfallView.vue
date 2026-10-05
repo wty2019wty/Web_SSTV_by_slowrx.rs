@@ -17,8 +17,6 @@ const props = defineProps<{
   maxHz: number
   /** 每列代表的时间跨度（秒）。 */
   secondsPerColumn: number
-  /** 是否正在接收（仅用于占位提示）。 */
-  active: boolean
 }>()
 
 const root = ref<HTMLDivElement | null>(null)

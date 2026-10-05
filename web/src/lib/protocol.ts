@@ -114,8 +114,6 @@ export type WorkerToMain =
       requestId: number
       /** 本批新列（列优先 8 位强度，长度 `count * bins`）。 */
       columns: Uint8Array
-      /** 该批首列的累计列号（用于诊断/对位）。 */
-      firstColumn: number
       count: number
       bins: number
     }
