@@ -1,0 +1,82 @@
+[package]
+name = "slowrx"
+version = "0.5.3"
+edition = "2021"
+rust-version = "1.85"
+description = "Pure-Rust SSTV (Slow-Scan TV) decoder library — a port of slowrx by Oona Räisänen"
+authors = ["Jason Herald <jason.herald@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/jasonherald/slowrx.rs"
+homepage = "https://github.com/jasonherald/slowrx.rs"
+documentation = "https://docs.rs/slowrx"
+readme = "README.md"
+keywords = ["sstv", "ham-radio", "amateur-radio", "decoder", "dsp"]
+categories = ["multimedia", "science"]
+include = [
+    "src/**/*",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "NOTICE.md",
+    "CHANGELOG.md",
+    "docs/intentional-deviations.md",
+]
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+panic = "warn"
+expect_used = "warn"
+
+[dependencies]
+thiserror = "2"
+rustfft = "6"
+# `cli` feature deps — pulled in only when the CLI binary or example is built.
+hound = { version = "3", optional = true }
+image = { version = "0.25", default-features = false, features = [
+    "png",
+], optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+anyhow = { version = "1", optional = true }
+
+[dev-dependencies]
+proptest = "1"
+assert_cmd = "2"
+
+[features]
+test-support = []
+# Enables the `slowrx-cli` binary and the `decode_wav` example.
+cli = ["dep:hound", "dep:image", "dep:clap", "dep:anyhow"]
+
+[[bin]]
+name = "slowrx-cli"
+path = "src/bin/slowrx_cli.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "decode_wav"
+required-features = ["cli"]
+
+[[test]]
+name = "roundtrip"
+required-features = ["test-support"]
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
+[[test]]
+name = "unknown_vis"
+required-features = ["test-support"]
+
+[[test]]
+name = "multi_image"
+required-features = ["test-support"]
+
+[[test]]
+name = "forced_mode"
+required-features = ["test-support"]

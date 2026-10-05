@@ -136,6 +136,15 @@ impl WasmDecoder {
         self.inner.clear_forced_mode();
     }
 
+    /// 开启/关闭渐进（实时）解码（默认关闭）。
+    ///
+    /// 开启后解码器不再攒满整图再爆发解码，而是锁定同步后**逐行**产出
+    /// `line` 事件（随后仍有 `image` 事件），适合实时接收时边收边画。
+    #[wasm_bindgen(js_name = setProgressive)]
+    pub fn set_progressive(&mut self, enabled: bool) {
+        self.inner.set_progressive(enabled);
+    }
+
     /// 丢弃进行中的图像并复位状态（保留强制模式设置）。
     pub fn reset(&mut self) {
         self.inner.reset();
