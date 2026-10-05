@@ -79,6 +79,7 @@ fn event_to_js(event: CoreEvent) -> JsValue {
             width,
             height,
             rgba,
+            partial,
         } => {
             set(&object, "type", JsValue::from_str("image"));
             set(&object, "mode", JsValue::from_str(mode));
@@ -89,6 +90,7 @@ fn event_to_js(event: CoreEvent) -> JsValue {
                 "rgba",
                 js_sys::Uint8Array::from(rgba.as_slice()).into(),
             );
+            set(&object, "partial", JsValue::from_bool(partial));
         }
     }
     object.into()
@@ -143,6 +145,18 @@ impl WasmDecoder {
     #[wasm_bindgen(js_name = setProgressive)]
     pub fn set_progressive(&mut self, enabled: bool) {
         self.inner.set_progressive(enabled);
+    }
+
+    /// 收尾：对进行中的图像做一次精修（用完整 sync 重解已到齐的行），
+    /// 返回逐行事件与一张 `partial: true` 的 `image`。未在解码中时返回空数组。
+    #[wasm_bindgen(js_name = finalize)]
+    pub fn finalize(&mut self) -> js_sys::Array {
+        let events = self.inner.finalize();
+        let array = js_sys::Array::new();
+        for event in events {
+            array.push(&event_to_js(event));
+        }
+        array
     }
 
     /// 丢弃进行中的图像并复位状态（保留强制模式设置）。

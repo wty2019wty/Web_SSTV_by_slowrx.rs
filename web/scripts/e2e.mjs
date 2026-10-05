@@ -344,6 +344,29 @@ try {
     await waitLiveStatusContains(page, '已停止', 15_000).catch(() => undefined)
     const stoppedText = await page.$eval('.live-status', (el) => el.textContent ?? '')
     check(stoppedText.includes('已停止'), '实时接收已停止')
+
+    // --- 输入诊断：显示实际生效的音频约束 ---
+    const diagText = await page.$eval('.diag', (el) => el.textContent ?? '').catch(() => '')
+    check(
+      diagText.includes('回声消除') && diagText.includes('自动增益') && diagText.includes('采样率'),
+      '输入诊断显示实际生效的音频约束',
+    )
+
+    // --- 录音 + 离线重解 ---
+    const redecodeReady = await page.evaluate(() => {
+      const b = [...document.querySelectorAll('button')].find((x) =>
+        x.textContent.includes('重解录音'),
+      )
+      return !!b && !b.disabled
+    })
+    check(redecodeReady, '停止后可用离线路径重解录音（录音已保存）')
+
+    if (redecodeReady) {
+      await clickButtonByText(page, '重解录音')
+      await waitStatusContains(page, '完成', 60_000).catch(() => undefined)
+      const reStatus = await page.$eval('.status', (el) => el.textContent ?? '')
+      check(reStatus.includes('完成'), '离线路径重解录音完成')
+    }
   }
 } catch (error) {
   failures++

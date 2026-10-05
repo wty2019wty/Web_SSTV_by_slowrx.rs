@@ -37,6 +37,7 @@ export class LiveCapture {
   private source: MediaStreamAudioSourceNode | null = null
   private node: AudioWorkletNode | null = null
   private sink: GainNode | null = null
+  private track: MediaStreamTrack | null = null
   /** 采集所用 AudioContext 的采样率（Hz）。 */
   sampleRate = 0
   active = false
@@ -64,8 +65,11 @@ export class LiveCapture {
     }
     if (options.deviceId) audio.deviceId = { exact: options.deviceId }
     const stream = await navigator.mediaDevices.getUserMedia({ audio })
+    const track = stream.getAudioTracks()[0] ?? null
 
     const context = new AudioContext()
+    // 尽早记录采样率：Worklet 可能在 `start()` 返回前就开始回传音频块。
+    this.sampleRate = context.sampleRate
     try {
       await context.audioWorklet.addModule(WORKLET_URL)
       const source = context.createMediaStreamSource(stream)
@@ -93,6 +97,7 @@ export class LiveCapture {
       this.source = source
       this.node = node
       this.sink = sink
+      this.track = track
       this.sampleRate = context.sampleRate
       this.active = true
       return context.sampleRate
@@ -101,6 +106,16 @@ export class LiveCapture {
       await context.close().catch(() => undefined)
       throw error
     }
+  }
+
+  /** 实际生效的音频轨道设置（浏览器可能覆盖请求的约束，如强开 AGC）。 */
+  settings(): MediaTrackSettings | null {
+    return this.track?.getSettings() ?? null
+  }
+
+  /** 输入设备名（首次授权后才有）。 */
+  label(): string {
+    return this.track?.label ?? ''
   }
 
   /** 停止采集并释放麦克风与音频上下文。可重复调用。 */
@@ -125,6 +140,7 @@ export class LiveCapture {
     this.source = null
     this.node = null
     this.sink = null
+    this.track = null
     if (context) await context.close().catch(() => undefined)
   }
 }

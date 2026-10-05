@@ -203,7 +203,7 @@ function decodeSelection(
 
 /** 建立实时接收会话：常驻解码器（自动识模）+ 流式频谱图。 */
 function startLive(requestId: number, sampleRate: number): void {
-  if (live) stopLiveInternal()
+  if (live) stopLiveInternal(requestId)
   const fftSize = pickLiveFftSize(sampleRate)
   const hop = Math.max(1, fftSize >> 1)
   const spec = new StreamingSpectrogram(sampleRate, fftSize, hop, LIVE_MAX_HZ)
@@ -257,10 +257,17 @@ function pushLive(requestId: number, samples: Float32Array): void {
 }
 
 /** 结束实时会话并释放 wasm 资源。 */
-function stopLiveInternal(): { elapsedMs: number; imageCount: number } {
+function stopLiveInternal(requestId: number): { elapsedMs: number; imageCount: number } {
   const current = live
   live = null
   if (!current) return { elapsedMs: 0, imageCount: 0 }
+  // 收尾精修：对进行中的图像用已收集的完整 sync 重解已到齐的行，发出逐行事件
+  // 与一张 partial 图；整图已完成的会话此调用返回空。
+  const finalEvents = current.decoder.finalize() as DecodeEvent[]
+  for (const event of finalEvents) {
+    if (event.type === 'image') current.images++
+    post({ type: 'event', requestId, event })
+  }
   current.decoder.free()
   current.spec.free()
   return { elapsedMs: performance.now() - current.startedAt, imageCount: current.images }
@@ -307,7 +314,7 @@ ctx.onmessage = async (e: MessageEvent<MainToWorker>) => {
         break
       }
       case 'liveStop': {
-        const summary = stopLiveInternal()
+        const summary = stopLiveInternal(message.requestId)
         post({ type: 'liveStopped', requestId: message.requestId, ...summary })
         break
       }

@@ -38,7 +38,15 @@ export type DecodeEvent =
   | { type: 'vis'; mode: string; sampleOffset: number; hedrShiftHz: number }
   | { type: 'unknownVis'; code: number; sampleOffset: number; hedrShiftHz: number }
   | { type: 'line'; mode: string; lineIndex: number; rgb: Uint8Array }
-  | { type: 'image'; mode: string; width: number; height: number; rgba: Uint8Array }
+  | {
+      type: 'image'
+      mode: string
+      width: number
+      height: number
+      rgba: Uint8Array
+      /** 是否为不完整图（实时接收中途停止时的收尾结果）。 */
+      partial: boolean
+    }
 
 /** 载入完成后的会话信息。 */
 export interface LoadedInfo {

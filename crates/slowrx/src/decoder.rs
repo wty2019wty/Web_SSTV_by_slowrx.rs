@@ -293,6 +293,20 @@ fn radio_frames_per_image(spec: crate::modespec::ModeSpec) -> u32 {
     }
 }
 
+/// Fresh per-mode chroma side planes (zeroed). `Some` only for the
+/// chroma-alternation modes (Robot 24/36) that need cross-radio-line state;
+/// `None` for every other mode. Shared by image-state construction and the
+/// progressive `finalize` re-decode so both start from a clean buffer.
+fn fresh_chroma_planes(spec: crate::modespec::ModeSpec) -> Option<[Vec<u8>; 2]> {
+    match spec.mode {
+        crate::modespec::SstvMode::Robot24 | crate::modespec::SstvMode::Robot36 => {
+            let n = (spec.image_lines as usize) * (spec.line_pixels as usize);
+            Some([vec![0_u8; n], vec![0_u8; n]])
+        }
+        _ => None,
+    }
+}
+
 /// Nominal airtime of one image, in seconds (un-rounded).
 fn nominal_image_seconds(spec: crate::modespec::ModeSpec) -> f64 {
     f64::from(radio_frames_per_image(spec)) * spec.line_seconds
@@ -900,20 +914,7 @@ impl SstvDecoder {
             hedr_shift_hz,
             target_audio_samples,
             phase,
-            chroma_planes: match spec.mode {
-                SstvMode::Robot24 | SstvMode::Robot36 => {
-                    let n = (spec.image_lines as usize) * (spec.line_pixels as usize);
-                    Some([vec![0_u8; n], vec![0_u8; n]])
-                }
-                // PD modes compose RGB per-pair in place. Robot 72 and Scottie
-                // 1/2/DX also compose RGB in-place per radio line (see
-                // mode_robot::decode_r72_line, mode_scottie::decode_line);
-                // only the R36/R24 chroma-alternation + duplication path
-                // requires the side buffer. SstvMode is #[non_exhaustive], so
-                // the wildcard arm is required; future modes with cross-line
-                // chroma state would need to opt in here.
-                _ => None,
-            },
+            chroma_planes: fresh_chroma_planes(spec),
             progressive,
             sync_est: None,
             est_frames: 0,
@@ -1195,6 +1196,48 @@ impl SstvDecoder {
         }
 
         d.next_frame >= total_frames
+    }
+
+    /// 收尾：若正在解码一张图，用**已收集到的完整 sync 轨道**重解已到齐的行，
+    /// 发出 `LineDecoded` 与 `ImageComplete { partial: true }`（未收到的行保持
+    /// 黑色）。用于实时接收中途停止时，把预览替换为一次精修结果。
+    ///
+    /// 未在解码中、或 sync 尚不足以定位（`find_sync` 未找到任何 sync 脉冲）时
+    /// 返回空，避免用瞎猜的 `skip` 解出垃圾图。
+    #[must_use]
+    pub fn finalize(&mut self) -> Vec<SstvEvent> {
+        let State::Decoding(d_box) = std::mem::replace(&mut self.state, State::AwaitingVis) else {
+            return Vec::new();
+        };
+        let mut d = *d_box;
+        let work_rate = f64::from(crate::resample::WORKING_SAMPLE_RATE_HZ);
+        let result = find_sync(&d.has_sync, work_rate, d.spec, &mut self.find_sync_scratch);
+        if result.slant_deg.is_none() {
+            return Vec::new();
+        }
+        let covered = Self::covered_frames(&d, work_rate).min(radio_frames_per_image(d.spec));
+        if covered == 0 {
+            return Vec::new();
+        }
+        // 干净的图 + 干净的色度平面，用整段 sync 重解已到齐的行。
+        d.image = SstvImage::new(d.spec.mode, d.spec.line_pixels, d.spec.image_lines);
+        d.chroma_planes = fresh_chroma_planes(d.spec);
+        let mut out = Vec::new();
+        Self::decode_frame_range(
+            &mut d,
+            result.skip_samples,
+            result.adjusted_rate_hz,
+            0,
+            covered,
+            &mut out,
+            &mut self.channel_demod,
+            &mut self.snr_est,
+        );
+        out.push(SstvEvent::ImageComplete {
+            image: d.image,
+            partial: true,
+        });
+        out
     }
 
     /// Reset to `AwaitingVis`; discard any in-flight image. The forced-decoding

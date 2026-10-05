@@ -24,6 +24,8 @@ interface DecodedImage {
   width: number
   height: number
   dataUrl: string
+  /** 是否为不完整图（实时接收中途停止的收尾结果）。 */
+  partial: boolean
 }
 
 const client = shallowRef<DecoderClient | null>(null)
@@ -71,6 +73,91 @@ let liveTimer = 0
 let liveStartedAt = 0
 /** 采集早于实时会话建立时暂存的音频块，会话建立后补投，避免丢掉开头。 */
 let livePendingChunks: Float32Array[] = []
+
+// 输入诊断：实际生效的音频约束 + 实时电平/削波，用于定位「实时比录音差」。
+interface AudioSettings {
+  device: string
+  sampleRate: number
+  channels: number
+  echoCancellation: boolean
+  noiseSuppression: boolean
+  autoGainControl: boolean
+}
+interface LiveLevel {
+  peakDb: number
+  rmsDb: number
+  clipPct: number
+  rangeDb: number
+}
+const audioSettings = ref<AudioSettings | null>(null)
+const liveLevel = ref<LiveLevel | null>(null)
+let diagPeak = 0
+let diagSumSq = 0
+let diagCount = 0
+let diagClips = 0
+let diagChunks = 0
+let diagQuietDb = Number.POSITIVE_INFINITY
+
+// 实时录音：停止后可一键用离线（文件）路径重解，得到权威结果。
+const RECORD_LIMIT_SECONDS = 300
+let recordedChunks: Float32Array[] = []
+let recordedRate = 0
+let recordedSamples = 0
+const lastRecording = shallowRef<{ sampleRate: number; audio: Float32Array } | null>(null)
+const redecodeBusy = ref(false)
+
+function onOff(value: boolean): string {
+  return value ? '开' : '关'
+}
+
+/** 累积一块音频的电平统计，约每秒刷新一次诊断面板。 */
+function updateLevelDiag(samples: Float32Array) {
+  let peak = 0
+  let sumSq = 0
+  let clips = 0
+  for (let i = 0; i < samples.length; i++) {
+    const v = samples[i]
+    const a = v < 0 ? -v : v
+    if (a > peak) peak = a
+    sumSq += v * v
+    if (a >= 0.999) clips++
+  }
+  diagPeak = Math.max(diagPeak, peak)
+  diagSumSq += sumSq
+  diagCount += samples.length
+  diagClips += clips
+  diagChunks++
+  if (diagChunks < 12 || diagCount === 0) return // 4096 帧/块 ≈ 12 块/秒
+  const peakDb = 20 * Math.log10(Math.max(diagPeak, 1e-6))
+  const rms = Math.sqrt(diagSumSq / diagCount)
+  const rmsDb = 20 * Math.log10(Math.max(rms, 1e-6))
+  if (rmsDb < diagQuietDb) diagQuietDb = rmsDb
+  liveLevel.value = {
+    peakDb,
+    rmsDb,
+    clipPct: (diagClips / diagCount) * 100,
+    rangeDb: peakDb - diagQuietDb,
+  }
+  diagPeak = 0
+  diagSumSq = 0
+  diagCount = 0
+  diagClips = 0
+  diagChunks = 0
+}
+
+/** 采集到一块音频：记录（供离线重解）+ 电平诊断，再转发给 Worker。 */
+function onLiveChunk(samples: Float32Array) {
+  const clientValue = client.value
+  if (!clientValue) return
+  if (!recordedRate) recordedRate = capture.value?.sampleRate ?? 0
+  if (recordedRate > 0 && recordedSamples < recordedRate * RECORD_LIMIT_SECONDS) {
+    recordedChunks.push(samples.slice())
+    recordedSamples += samples.length
+  }
+  updateLevelDiag(samples)
+  if (liveActive.value) clientValue.pushLive(samples)
+  else livePendingChunks.push(samples)
+}
 
 /** 切换音频来源；离开麦克风时停止正在进行的接收。 */
 function selectSource(mode: 'file' | 'mic') {
@@ -135,6 +222,7 @@ function addResult(event: Extract<DecodeEvent, { type: 'image' }>) {
     width: event.width,
     height: event.height,
     dataUrl: canvas.toDataURL('image/png'),
+    partial: event.partial,
   })
 }
 
@@ -190,14 +278,6 @@ function handleLiveEvent(event: DecodeEvent) {
   }
 }
 
-/** 采集到一块音频：会话已建立就转发给 Worker，否则暂存待补投。 */
-function onLiveChunk(samples: Float32Array) {
-  const clientValue = client.value
-  if (!clientValue) return
-  if (liveActive.value) clientValue.pushLive(samples)
-  else livePendingChunks.push(samples)
-}
-
 /** 停止并释放麦克风采集。 */
 async function stopCapture() {
   window.clearInterval(liveTimer)
@@ -216,6 +296,17 @@ async function startLiveReceive() {
   results.value = []
   liveImageCount.value = 0
   liveImage.value?.clear()
+  recordedChunks = []
+  recordedSamples = 0
+  recordedRate = 0
+  diagPeak = 0
+  diagSumSq = 0
+  diagCount = 0
+  diagClips = 0
+  diagChunks = 0
+  diagQuietDb = Number.POSITIVE_INFINITY
+  liveLevel.value = null
+  audioSettings.value = null
   try {
     const cap = new LiveCapture()
     capture.value = cap
@@ -226,6 +317,16 @@ async function startLiveReceive() {
       },
       { deviceId: selectedInputId.value || undefined },
     )
+    // 实际生效的约束（浏览器可能覆盖请求；用于诊断 AGC/降噪是否被强开）。
+    const settings = cap.settings()
+    audioSettings.value = {
+      device: cap.label() || '默认设备',
+      sampleRate,
+      channels: settings?.channelCount ?? 1,
+      echoCancellation: settings?.echoCancellation ?? false,
+      noiseSuppression: settings?.noiseSuppression ?? false,
+      autoGainControl: settings?.autoGainControl ?? false,
+    }
     // 首次授权后设备名才可见，刷新一次下拉选项。
     void refreshAudioInputs()
     const info = await clientValue.startLive(sampleRate, {
@@ -258,6 +359,7 @@ async function stopLiveReceive() {
   liveBusy.value = true
   try {
     await stopCapture()
+    saveRecording()
     const summary = await clientValue.stopLive()
     liveImageCount.value = summary.imageCount
     liveStatus.value = `已停止：解出 ${summary.imageCount} 张，用时 ${(summary.elapsedMs / 1000).toFixed(1)}s`
@@ -269,6 +371,48 @@ async function stopLiveReceive() {
     liveInfo.value = null
     livePendingChunks = []
     liveBusy.value = false
+  }
+}
+
+/** 把已录的实时音频拼成一段，供离线重解。 */
+function saveRecording() {
+  if (recordedChunks.length === 0 || recordedRate <= 0) return
+  const total = recordedChunks.reduce((sum, chunk) => sum + chunk.length, 0)
+  const audio = new Float32Array(total)
+  let offset = 0
+  for (const chunk of recordedChunks) {
+    audio.set(chunk, offset)
+    offset += chunk.length
+  }
+  lastRecording.value = { sampleRate: recordedRate, audio }
+  recordedChunks = []
+  recordedSamples = 0
+}
+
+/** 把刚录下的实时音频载入文件解码路径，自动识模重解整段。 */
+async function redecodeRecording() {
+  const rec = lastRecording.value
+  const clientValue = client.value
+  if (!rec || !clientValue || busy.value || liveActive.value || redecodeBusy.value) return
+  redecodeBusy.value = true
+  beginJob('正在载入录音并准备离线解码…')
+  try {
+    const info = await clientValue.loadAudio(rec.sampleRate, rec.audio)
+    applyLoaded(info)
+    sourceMode.value = 'file'
+    sourceName.value = '实时接收录音'
+    status.value = '正在用离线路径重解整段录音…'
+    const result = await clientValue.decode(
+      { startSample: 0, endSample: rec.audio.length },
+      { onEvent: handleEvent, onProgress },
+    )
+    endJob(result)
+    pushLog(`离线重解录音：${results.value.length} 张`)
+  } catch (error) {
+    failJob(error)
+  } finally {
+    busy.value = false
+    redecodeBusy.value = false
   }
 }
 
@@ -620,9 +764,66 @@ onBeforeUnmount(() => {
           :active="liveActive"
         />
         <LiveImageView ref="liveImage" />
+
+        <details class="devtools" :open="liveActive || !!audioSettings">
+          <summary>输入诊断（定位实时质量）</summary>
+          <div v-if="audioSettings" class="diag">
+            <div class="diag-row">
+              <span>设备</span><span>{{ audioSettings.device || '默认设备' }}</span>
+            </div>
+            <div class="diag-row">
+              <span>采样率 / 声道</span>
+              <span>{{ audioSettings.sampleRate }} Hz · {{ audioSettings.channels }} ch</span>
+            </div>
+            <div class="diag-row">
+              <span>音频处理</span>
+              <span
+                :class="{
+                  warn:
+                    audioSettings.echoCancellation ||
+                    audioSettings.noiseSuppression ||
+                    audioSettings.autoGainControl,
+                }"
+              >
+                回声消除 {{ onOff(audioSettings.echoCancellation) }} · 降噪
+                {{ onOff(audioSettings.noiseSuppression) }} · 自动增益
+                {{ onOff(audioSettings.autoGainControl) }}
+              </span>
+            </div>
+            <div v-if="liveLevel" class="diag-row">
+              <span>电平</span>
+              <span :class="{ warn: liveLevel.clipPct > 0.01 || liveLevel.peakDb < -30 }">
+                峰值 {{ liveLevel.peakDb.toFixed(1) }} dBFS · RMS
+                {{ liveLevel.rmsDb.toFixed(1) }} dBFS · 削波 {{ liveLevel.clipPct.toFixed(2) }}% ·
+                动态范围 {{ liveLevel.rangeDb.toFixed(0) }} dB
+              </span>
+            </div>
+            <p class="hint">
+              理想情况：音频处理全为「关」。若「自动增益」为开，说明浏览器/驱动覆盖了请求，
+              会破坏 SSTV 的频率调制；若削波 &gt; 0 或峰值贴近 0 dBFS，请调低麦克风增益；
+              若峰值低于约 -30 dBFS，请调高。
+            </p>
+          </div>
+          <p v-else class="hint">开始接收后显示实际生效的音频约束与实时电平。</p>
+        </details>
+
+        <div class="row">
+          <button
+            :disabled="!lastRecording || busy || liveActive || redecodeBusy"
+            @click="redecodeRecording"
+          >
+            ⏮ 用离线路径重解录音{{
+              lastRecording
+                ? `（${(lastRecording.audio.length / lastRecording.sampleRate).toFixed(0)}s）`
+                : ''
+            }}
+          </button>
+          <span class="hint">把刚录下的实时音频载入文件解码路径重解，得到权威结果（同源对比）。</span>
+        </div>
+
         <p class="hint">
-          需要 HTTPS 或 localhost；已关闭回声消除/降噪/自动增益，避免破坏 SSTV 信号。
-          检测到 VIS 后会逐行绘制，整张收完再用完整同步重解一遍（最终图与离线解码一致），
+          需要 HTTPS 或 localhost；已请求关闭回声消除/降噪/自动增益，避免破坏 SSTV 信号。
+          检测到 VIS 后会逐行绘制，整张收完（或点停止）再用完整同步重解一遍，
           结果同时加入下方「解码结果」画廊。
         </p>
       </template>
@@ -687,7 +888,10 @@ onBeforeUnmount(() => {
         <figure v-for="(image, index) in results" :key="index" class="result">
           <img :src="image.dataUrl" :alt="`${image.mode} ${image.width}x${image.height}`" />
           <figcaption>
-            <span>{{ image.mode }} · {{ image.width }}×{{ image.height }}</span>
+            <span>
+              {{ image.mode }} · {{ image.width }}×{{ image.height }}
+              <em v-if="image.partial" class="badge">未完整</em>
+            </span>
             <a :href="image.dataUrl" :download="`sstv-${index + 1}-${image.mode}.png`">下载</a>
           </figcaption>
         </figure>
@@ -839,6 +1043,36 @@ button:disabled {
   background: #2b3038;
   border-radius: 4px;
   padding: 0 0.25rem;
+}
+/* 输入诊断面板。 */
+.diag {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.25rem 0 0.5rem;
+  font-size: 0.82rem;
+  color: #9fb3c8;
+}
+.diag-row {
+  display: flex;
+  gap: 0.75rem;
+}
+.diag-row > span:first-child {
+  flex: 0 0 8.5rem;
+  color: #6b7280;
+}
+.warn {
+  color: #f0b34a;
+}
+/* 不完整图标记。 */
+.badge {
+  margin-left: 0.35rem;
+  padding: 0 0.3rem;
+  border-radius: 4px;
+  background: #6b4a12;
+  color: #ffd166;
+  font-size: 0.7rem;
+  font-style: normal;
 }
 .progress {
   height: 6px;

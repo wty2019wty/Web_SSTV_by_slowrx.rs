@@ -36,13 +36,15 @@ pub enum CoreEvent {
         /// 该行像素，RGB 顺序，长度 `width * 3`。
         rgb: Vec<u8>,
     },
-    /// 一张图完整解码完成。
+    /// 一张图完整解码完成（`partial` 为真表示提前收尾的不完整图）。
     Image {
         mode: &'static str,
         width: u32,
         height: u32,
         /// RGBA，长度 `width * height * 4`。
         rgba: Vec<u8>,
+        /// 是否为不完整图（实时接收中途停止时的收尾结果）。
+        partial: bool,
     },
 }
 
@@ -154,6 +156,17 @@ impl CoreDecoder {
         self.emit_lines = enabled;
     }
 
+    /// 收尾：对进行中的图像做一次精修（用已收集的完整 sync 重解已到齐的行），
+    /// 发出逐行事件与一张 `partial` 图。未在解码中时返回空。
+    pub fn finalize(&mut self) -> Vec<CoreEvent> {
+        let emit_lines = self.emit_lines;
+        self.decoder
+            .finalize()
+            .into_iter()
+            .filter_map(|event| convert_event(event, emit_lines))
+            .collect()
+    }
+
     /// 丢弃进行中的图像并复位状态（保留强制模式设置）。
     pub fn reset(&mut self) {
         self.decoder.reset();
@@ -212,11 +225,12 @@ fn convert_event(event: SstvEvent, emit_lines: bool) -> Option<CoreEvent> {
                 rgb,
             }
         }),
-        SstvEvent::ImageComplete { image, .. } => Some(CoreEvent::Image {
+        SstvEvent::ImageComplete { image, partial } => Some(CoreEvent::Image {
             mode: mode_short_name(image.mode),
             width: image.width,
             height: image.height,
             rgba: rgb_to_rgba(&image.pixels),
+            partial,
         }),
         // `SstvEvent` 标注了 #[non_exhaustive]，未来新增变体时忽略即可。
         _ => None,
@@ -310,6 +324,7 @@ mod tests {
                 width,
                 height,
                 rgba,
+                ..
             } = e
             {
                 assert!(found.is_none(), "期望恰好一张图，出现多张");
@@ -464,5 +479,41 @@ mod tests {
             (batch_image.width, batch_image.height)
         );
         assert_eq!(image.pixels, batch_image.pixels, "渐进结果应与批处理一致");
+    }
+
+    /// 收尾精修：只喂入部分音频后 `finalize`，应产出一张标记 `partial` 的图。
+    #[test]
+    fn finalize_produces_partial_image() {
+        let audio = synth_test_audio("pd120", true).expect("合成音频");
+        // 只喂入约 40% 的音频（足以检测 VIS 与部分行）。
+        let partial = &audio[..(audio.len() * 2 / 5)];
+
+        let mut decoder = CoreDecoder::new(slowrx::WORKING_SAMPLE_RATE_HZ, true).expect("decoder");
+        decoder.set_progressive(true);
+        let _ = decoder.push_audio(partial);
+
+        let spec = slowrx::for_mode(SstvMode::Pd120);
+        let (is_partial, width, height, rgba) = decoder
+            .finalize()
+            .into_iter()
+            .find_map(|event| match event {
+                CoreEvent::Image {
+                    partial,
+                    width,
+                    height,
+                    rgba,
+                    ..
+                } => Some((partial, width, height, rgba)),
+                _ => None,
+            })
+            .expect("finalize 应产出 partial 图");
+
+        assert!(is_partial, "finalize 结果应标记为 partial");
+        assert_eq!((width, height), (spec.line_pixels, spec.image_lines));
+        let nonblack = rgba
+            .chunks_exact(4)
+            .filter(|px| px[0] > 10 || px[1] > 10 || px[2] > 10)
+            .count();
+        assert!(nonblack > 0, "应至少解出一部分像素");
     }
 }
