@@ -4,7 +4,7 @@
 // 方案 4.1：slowrx 是“两遍式”解码 —— 缓冲满约一张图后才爆发式计算，
 // 因此这里的工作模式是“喂入整段切片 → 收完整事件”，进度按喂入量估算。
 
-import init, { WasmDecoder, listModes, synthTestAudio } from '../wasm/slowrx_wasm.js'
+import init, { WasmDecoder, listModes } from '../wasm/slowrx_wasm.js'
 // 显式带上 wasm 的 URL，交给 Vite 处理（dev 与 build 都能正确定位资源），
 // 避免依赖 wasm-bindgen 默认的 `new URL(..., import.meta.url)` 猜测。
 import wasmUrl from '../wasm/slowrx_wasm_bg.wasm?url'
@@ -75,8 +75,14 @@ ctx.onmessage = async (e: MessageEvent<MainToWorker>) => {
       }
       case 'synth': {
         await ensureReady()
-        // dev-synth 构建才导出该函数；生产构建下会抛错。
-        const audio = synthTestAudio(message.mode, message.withVis)
+        // `dev-synth` 构建才有该导出；生产构建下给出明确提示而非崩溃。
+        const mod = (await import('../wasm/slowrx_wasm.js')) as typeof import('../wasm/slowrx_wasm.js') & {
+          synthTestAudio?: (mode: string, withVis: boolean) => Float32Array
+        }
+        if (typeof mod.synthTestAudio !== 'function') {
+          throw new Error('当前 wasm 构建不含合成音频工具（请用 build-wasm.ps1 -Dev 构建）')
+        }
+        const audio = mod.synthTestAudio(message.mode, message.withVis)
         await runDecode(message.requestId, 11025, audio)
         break
       }
