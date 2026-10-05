@@ -96,19 +96,40 @@ async function resultMeanR(page) {
   })
 }
 
-async function resultSize(page) {
-  return page.evaluate(() => {
-    const canvas = document.querySelector('canvas.preview')
-    return canvas ? { width: canvas.width, height: canvas.height } : null
-  })
-}
-
 /** 按索引切换复选框（0=synthWithVis，1=forcedMode）。 */
 async function toggleCheckbox(page, index) {
   await page.evaluate((i) => {
     const boxes = document.querySelectorAll('input[type=checkbox]')
     boxes[i]?.click()
   }, index)
+}
+
+/** 设置强制模式锚点选择框（按选项文案定位）。 */
+async function selectAnchor(page, value) {
+  await page.evaluate((val) => {
+    const select = [...document.querySelectorAll('select')].find((s) =>
+      [...s.options].some((o) => o.textContent.includes('选区结束')),
+    )
+    if (!select) throw new Error('未找到锚点选择框')
+    select.value = val
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+  }, value)
+}
+
+/** 触发解码并断言出图。 */
+async function decodeAndCheck(page, label) {
+  await clickButtonByText(page, '解码选区')
+  await page.waitForFunction(
+    () => {
+      const c = document.querySelector('canvas.preview')
+      return c && c.width === 640 && c.height === 496
+    },
+    { timeout: 180_000, polling: 500 },
+  )
+  const meanR = await resultMeanR(page)
+  check(meanR > 10, `${label}画布非全黑（平均 R ${meanR.toFixed(1)}）`)
+  const status = await page.$eval('.status', (el) => el.textContent ?? '')
+  check(status.includes('完成'), `${label}状态完成`)
 }
 
 try {
@@ -138,36 +159,19 @@ try {
   check(maxIntensity > 120, '频谱图渲染出高亮内容')
 
   // --- 自动识模解码选区 ---
-  await clickButtonByText(page, '解码选区')
-  await page.waitForFunction(
-    () => {
-      const c = document.querySelector('canvas.preview')
-      return c && c.width === 640 && c.height === 496
-    },
-    { timeout: 180_000, polling: 500 },
-  )
-  const size = await resultSize(page)
-  check(size?.width === 640 && size?.height === 496, `自动识模出图 ${size?.width}×${size?.height}`)
-  const meanR = await resultMeanR(page)
-  check(meanR > 10, `自动识模画布非全黑（平均 R ${meanR.toFixed(1)}）`)
-  check((await page.$eval('.status', (el) => el.textContent))?.includes('完成'), '自动识模状态完成')
+  await decodeAndCheck(page, '自动识模')
 
-  // --- 强制模式（合成无 VIS）---
+  // --- 强制模式（合成无 VIS），锚点=选区开始 ---
   await toggleCheckbox(page, 0) // 关闭“包含 VIS 头”
   await clickButtonByText(page, '生成合成音频')
   await waitStatusContains(page, '已载入', 120_000)
   await toggleCheckbox(page, 1) // 打开“强制模式”
-  await clickButtonByText(page, '解码选区')
-  await page.waitForFunction(
-    () => {
-      const c = document.querySelector('canvas.preview')
-      return c && c.width === 640 && c.height === 496
-    },
-    { timeout: 180_000, polling: 500 },
-  )
-  const forcedMeanR = await resultMeanR(page)
-  check(forcedMeanR > 10, `强制模式画布非全黑（平均 R ${forcedMeanR.toFixed(1)}）`)
-  check((await page.$eval('.status', (el) => el.textContent))?.includes('完成'), '强制模式状态完成')
+  await selectAnchor(page, 'start')
+  await decodeAndCheck(page, '强制模式(锚点=开始)')
+
+  // --- 强制模式，锚点=选区结束 ---
+  await selectAnchor(page, 'end')
+  await decodeAndCheck(page, '强制模式(锚点=结束)')
 } catch (error) {
   failures++
   console.error('E2E 异常：', error instanceof Error ? error.message : error)

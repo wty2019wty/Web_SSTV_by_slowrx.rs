@@ -6,12 +6,19 @@
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import { DecoderClient } from './lib/decoderClient'
 import SpectrogramView from './components/SpectrogramView.vue'
-import type { DecodeEvent, LoadedInfo, ModeInfo, TimeSelection } from './lib/protocol'
+import type {
+  DecodeEvent,
+  ForcedAnchor,
+  LoadedInfo,
+  ModeInfo,
+  TimeSelection,
+} from './lib/protocol'
 
 const client = shallowRef<DecoderClient | null>(null)
 const modes = ref<ModeInfo[]>([])
 const selectedMode = ref('pd120')
 const forcedMode = ref(false) // false = VIS 自动识模；true = 按所选模式强制解码
+const forcedAnchor = ref<ForcedAnchor>('start') // 强制模式锚点：选区开始 / 结束
 const synthWithVis = ref(true)
 
 const loaded = ref<LoadedInfo | null>(null)
@@ -157,6 +164,7 @@ async function decodeSelection() {
         startSample,
         endSample,
         mode: forcedMode.value ? selectedMode.value : undefined,
+        anchor: forcedMode.value ? forcedAnchor.value : undefined,
       },
       { onEvent: handleEvent, onProgress },
     )
@@ -258,9 +266,19 @@ onBeforeUnmount(() => {
           <input v-model="forcedMode" type="checkbox" :disabled="busy" />
           强制模式（选区不含 VIS 头时使用）
         </label>
+        <label v-if="forcedMode">
+          锚点
+          <select v-model="forcedAnchor" :disabled="busy">
+            <option value="start">选区开始（图像起点）</option>
+            <option value="end">选区结束（图像数据末尾）</option>
+          </select>
+        </label>
         <button :disabled="busy || !loaded" @click="decodeSelection">解码选区</button>
         <button :disabled="busy || !hasImage" @click="download">下载 PNG</button>
       </div>
+      <p v-if="forcedMode" class="hint">
+        强制模式只需一个锚点：解码长度由 {{ currentMode?.name }} 的标称时长决定，会从锚点一直读取到文件末尾。
+      </p>
       <p class="status">{{ status }}</p>
       <div class="progress"><div class="bar" :style="{ width: progress + '%' }" /></div>
       <p v-if="elapsedMs !== null" class="hint">解码耗时 {{ elapsedMs.toFixed(0) }} ms</p>

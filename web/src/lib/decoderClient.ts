@@ -1,5 +1,6 @@
 import type {
   DecodeEvent,
+  ForcedAnchor,
   LoadedInfo,
   MainToWorker,
   ModeInfo,
@@ -122,7 +123,7 @@ export class DecoderClient {
 
   /** 解码选区（缺省整段）；`mode` 提供时走强制模式。 */
   async decode(
-    params: { startSample?: number; endSample?: number; mode?: string },
+    params: { startSample?: number; endSample?: number; mode?: string; anchor?: ForcedAnchor },
     handlers?: DecodeHandlers,
   ): Promise<DecodeResult> {
     const { message, events } = await this.request(

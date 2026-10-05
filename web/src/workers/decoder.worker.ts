@@ -2,13 +2,17 @@
 // 解码 / 频谱图 Worker：所有 wasm 计算都跑在这里，避免阻塞主线程。
 //
 // 会话模型：本 Worker 持有当前载入的 PCM，频谱图在此计算（复用 wasm 内
-// rustfft），选区解码时直接切片并末尾补静音（方案 4.3、6.3、6.5）。
+// rustfft）。解码分两条路径（方案 6.5）：
+//   - 自动识模：只喂入选区切片 + 末尾静音，由 VIS 头定位图像；
+//   - 强制模式：只需一个锚点（选区开始或结束），从锚点一直喂到文件末尾
+//     + 末尾静音，由 slowrx 按模式标称时长截取解码窗口。
 
 import init, { WasmDecoder, listModes, computeSpectrogram } from '../wasm/slowrx_wasm.js'
 // 显式带上 wasm 的 URL，交给 Vite 处理（dev 与 build 都能正确定位资源）。
 import wasmUrl from '../wasm/slowrx_wasm_bg.wasm?url'
 import type {
   DecodeEvent,
+  ForcedAnchor,
   MainToWorker,
   ModeInfo,
   SpectrogramInfo,
@@ -43,8 +47,9 @@ const HOP = 256
 const MAX_HZ = 4000
 /** 每批推入解码器的采样点数。 */
 const FEED_CHUNK = 32768
-/** 选区末尾补静音时长（秒），保证解码器能凑满一帧触发解码（方案 4.3）。 */
-const PAD_SECONDS = 1.0
+/** 末尾补静音时长（秒），保证解码器能凑满一帧触发解码（方案 4.3）。
+ *  取 2 s 而非 1 s：`ending_at` 推导出的起点可能贴近窗口边界，需要余量。 */
+const PAD_SECONDS = 2.0
 
 /** 加载 dev-synth 才存在的合成音频导出（生产构建下给出明确提示）。 */
 async function synthAudio(mode: string, withVis: boolean): Promise<Float32Array> {
@@ -74,7 +79,11 @@ function computeSpectrogramInfo(sampleRate: number, audio: Float32Array): Spectr
   }
 }
 
-async function storeAndReport(requestId: number, sampleRate: number, audio: Float32Array): Promise<void> {
+async function storeAndReport(
+  requestId: number,
+  sampleRate: number,
+  audio: Float32Array,
+): Promise<void> {
   session = { sampleRate, audio }
   const spectrogram = computeSpectrogramInfo(sampleRate, audio)
   post(
@@ -90,33 +99,59 @@ async function storeAndReport(requestId: number, sampleRate: number, audio: Floa
   )
 }
 
-async function decodeSelection(
+/** 依次喂入若干音频段，回传事件与进度。 */
+function feedSegments(decoder: WasmDecoder, requestId: number, segments: Float32Array[]): void {
+  const total = segments.reduce((sum, segment) => sum + segment.length, 0)
+  let fed = 0
+  for (const segment of segments) {
+    for (let offset = 0; offset < segment.length; offset += FEED_CHUNK) {
+      const stop = Math.min(offset + FEED_CHUNK, segment.length)
+      const events = decoder.pushAudio(segment.subarray(offset, stop)) as DecodeEvent[]
+      for (const event of events) post({ type: 'event', requestId, event })
+      fed += stop - offset
+      post({ type: 'progress', requestId, fedSamples: fed, totalSamples: total })
+    }
+  }
+}
+
+function decodeSelection(
   requestId: number,
   startSample: number | undefined,
   endSample: number | undefined,
   mode: string | undefined,
-): Promise<void> {
-  await ensureReady()
+  anchor: ForcedAnchor,
+): void {
   if (!session) throw new Error('尚未载入音频')
   const { sampleRate, audio } = session
-
   const start = Math.max(0, Math.min(startSample ?? 0, audio.length))
   const end = Math.max(start, Math.min(endSample ?? audio.length, audio.length))
-  const padLength = Math.round(sampleRate * PAD_SECONDS)
-  const slice = new Float32Array(end - start + padLength)
-  slice.set(audio.subarray(start, end), 0) // 其余保持 0（静音）
 
-  console.log(`[worker] 选区解码：${end - start} 采样 + ${padLength} 静音 @ ${sampleRate} Hz`)
+  // 末尾补静音，保证能凑满解码窗口。
+  const pad = new Float32Array(Math.round(sampleRate * PAD_SECONDS))
   const startedAt = performance.now()
   const decoder = new WasmDecoder(sampleRate)
   try {
-    if (mode) decoder.setForcedMode(mode, 0, undefined)
-    for (let offset = 0; offset < slice.length; offset += FEED_CHUNK) {
-      const stop = Math.min(offset + FEED_CHUNK, slice.length)
-      const events = decoder.pushAudio(slice.subarray(offset, stop)) as DecodeEvent[]
-      for (const event of events) post({ type: 'event', requestId, event })
-      post({ type: 'progress', requestId, fedSamples: stop, totalSamples: slice.length })
+    let segments: Float32Array[]
+    if (mode) {
+      // 强制模式：只用一个锚点，从锚点一直喂到文件末尾（slowrx 自行截取
+      // 标称图像长度）。锚点时间相对“喂入流的第一帧”，即音频起点。
+      const anchorSample = anchor === 'end' ? end : start
+      const anchorSecs = anchorSample / sampleRate
+      decoder.setForcedMode(
+        mode,
+        anchor === 'start' ? anchorSecs : undefined,
+        anchor === 'end' ? anchorSecs : undefined,
+      )
+      segments = [audio, pad]
+      console.log(
+        `[worker] 强制解码：模式 ${mode}，锚点 ${anchor} @ ${anchorSecs.toFixed(3)}s，喂入至文件末尾`,
+      )
+    } else {
+      // 自动识模：只喂入选区，避免误识别选区外的 VIS。
+      segments = [audio.subarray(start, end), pad]
+      console.log(`[worker] 自动识模：选区 ${end - start} 采样 @ ${sampleRate} Hz`)
     }
+    feedSegments(decoder, requestId, segments)
     post({ type: 'done', requestId, elapsedMs: performance.now() - startedAt })
     console.log(`[worker] 解码完成，耗时 ${(performance.now() - startedAt).toFixed(0)} ms`)
   } finally {
@@ -145,11 +180,13 @@ ctx.onmessage = async (e: MessageEvent<MainToWorker>) => {
         break
       }
       case 'decode': {
-        await decodeSelection(
+        await ensureReady()
+        decodeSelection(
           message.requestId,
           message.startSample,
           message.endSample,
           message.mode,
+          message.anchor ?? 'start',
         )
         break
       }

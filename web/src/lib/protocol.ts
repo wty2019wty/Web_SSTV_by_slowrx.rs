@@ -49,6 +49,9 @@ export interface LoadedInfo {
   spectrogram: SpectrogramInfo
 }
 
+/** 强制模式的锚点端点：选区开始或结束（方案 4.2/6.5）。 */
+export type ForcedAnchor = 'start' | 'end'
+
 /** 主线程 -> Worker。 */
 export type MainToWorker =
   | { type: 'listModes'; requestId: number }
@@ -62,6 +65,8 @@ export type MainToWorker =
       endSample?: number
       /** 提供时走强制模式（选区不含 VIS 头）；否则 VIS 自动识模。 */
       mode?: string
+      /** 强制模式的锚点端点，默认 `start`。 */
+      anchor?: ForcedAnchor
     }
 
 /** Worker -> 主线程。 */
