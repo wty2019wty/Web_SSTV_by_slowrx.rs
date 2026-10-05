@@ -1243,3 +1243,16 @@ button:disabled {
   }
 }
 </style>
+
+<style>
+/* 全局铺底（不加 scoped）：
+   .app 为了可读性限宽 1000px 并居中，超出的部分落在 html/body 上，
+   而 body 默认是白色画布，宽屏下两侧就会出现白边。
+   这里把 html/body/#app 一并刷成与 .app 相同的深色，并清掉 body 默认外边距。 */
+html,
+body,
+#app {
+  margin: 0;
+  background: #16181d;
+}
+</style>
