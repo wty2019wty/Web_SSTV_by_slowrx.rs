@@ -15,9 +15,8 @@ crate-type = ["cdylib", "rlib"]
 slowrx = { git = "https://github.com/wty2019wty/slowrx.rs", branch = "sstv-web" }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
-
-# 只在 wasm 目标上启用 rustfft 的 SIMD 内核，避免影响原生构建。
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# 频谱图（STFT）复用 rustfft，与解码器同源。
+# `wasm_simd` 是空 feature，只在 wasm32 下通过 cfg 生效，原生构建无副作用。
 rustfft = { version = "6", features = ["wasm_simd"] }
 
 [dev-dependencies]

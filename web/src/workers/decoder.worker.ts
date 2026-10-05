@@ -1,14 +1,19 @@
 /// <reference lib="webworker" />
-// 解码 Worker：所有 wasm 解码与（后续的）STFT 都跑在这里，避免阻塞主线程。
+// 解码 / 频谱图 Worker：所有 wasm 计算都跑在这里，避免阻塞主线程。
 //
-// 方案 4.1：slowrx 是“两遍式”解码 —— 缓冲满约一张图后才爆发式计算，
-// 因此这里的工作模式是“喂入整段切片 → 收完整事件”，进度按喂入量估算。
+// 会话模型：本 Worker 持有当前载入的 PCM，频谱图在此计算（复用 wasm 内
+// rustfft），选区解码时直接切片并末尾补静音（方案 4.3、6.3、6.5）。
 
-import init, { WasmDecoder, listModes } from '../wasm/slowrx_wasm.js'
-// 显式带上 wasm 的 URL，交给 Vite 处理（dev 与 build 都能正确定位资源），
-// 避免依赖 wasm-bindgen 默认的 `new URL(..., import.meta.url)` 猜测。
+import init, { WasmDecoder, listModes, computeSpectrogram } from '../wasm/slowrx_wasm.js'
+// 显式带上 wasm 的 URL，交给 Vite 处理（dev 与 build 都能正确定位资源）。
 import wasmUrl from '../wasm/slowrx_wasm_bg.wasm?url'
-import type { MainToWorker, WorkerToMain, ModeInfo, DecodeEvent } from '../lib/protocol'
+import type {
+  DecodeEvent,
+  MainToWorker,
+  ModeInfo,
+  SpectrogramInfo,
+  WorkerToMain,
+} from '../lib/protocol'
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope
 
@@ -21,41 +26,96 @@ function ensureReady(): Promise<void> {
   return ready
 }
 
-function post(message: WorkerToMain): void {
-  ctx.postMessage(message)
+function post(message: WorkerToMain, transfer?: Transferable[]): void {
+  ctx.postMessage(message, transfer ?? [])
 }
 
-/** 每批推入的采样点数（约 3 秒 @11025 Hz）。 */
-const FEED_CHUNK = 32768
+interface Session {
+  sampleRate: number
+  audio: Float32Array
+}
 
-async function runDecode(
+let session: Session | null = null
+
+/** STFT 参数：11025 Hz 下频率分辨率约 10.8 Hz，75% 重叠。 */
+const FFT_SIZE = 1024
+const HOP = 256
+const MAX_HZ = 4000
+/** 每批推入解码器的采样点数。 */
+const FEED_CHUNK = 32768
+/** 选区末尾补静音时长（秒），保证解码器能凑满一帧触发解码（方案 4.3）。 */
+const PAD_SECONDS = 1.0
+
+/** 加载 dev-synth 才存在的合成音频导出（生产构建下给出明确提示）。 */
+async function synthAudio(mode: string, withVis: boolean): Promise<Float32Array> {
+  const mod = (await import('../wasm/slowrx_wasm.js')) as typeof import('../wasm/slowrx_wasm.js') & {
+    synthTestAudio?: (mode: string, withVis: boolean) => Float32Array
+  }
+  if (typeof mod.synthTestAudio !== 'function') {
+    throw new Error('当前 wasm 构建不含合成音频工具（请用 build-wasm.ps1 -Dev 构建）')
+  }
+  return mod.synthTestAudio(mode, withVis)
+}
+
+function computeSpectrogramInfo(sampleRate: number, audio: Float32Array): SpectrogramInfo {
+  const spec = computeSpectrogram(audio, sampleRate, FFT_SIZE, HOP, MAX_HZ)
+  try {
+    return {
+      columns: spec.columns,
+      bins: spec.bins,
+      hop: spec.hop,
+      sampleRate: spec.sampleRate,
+      maxHz: spec.maxHz,
+      secondsPerColumn: spec.secondsPerColumn,
+      data: spec.data(),
+    }
+  } finally {
+    spec.free()
+  }
+}
+
+async function storeAndReport(requestId: number, sampleRate: number, audio: Float32Array): Promise<void> {
+  session = { sampleRate, audio }
+  const spectrogram = computeSpectrogramInfo(sampleRate, audio)
+  post(
+    {
+      type: 'loaded',
+      requestId,
+      sampleRate,
+      totalSamples: audio.length,
+      duration: audio.length / sampleRate,
+      spectrogram,
+    },
+    [spectrogram.data.buffer],
+  )
+}
+
+async function decodeSelection(
   requestId: number,
-  sampleRate: number,
-  audio: Float32Array,
-  mode?: string,
-  startSecs?: number,
-  endSecs?: number,
+  startSample: number | undefined,
+  endSample: number | undefined,
+  mode: string | undefined,
 ): Promise<void> {
   await ensureReady()
+  if (!session) throw new Error('尚未载入音频')
+  const { sampleRate, audio } = session
+
+  const start = Math.max(0, Math.min(startSample ?? 0, audio.length))
+  const end = Math.max(start, Math.min(endSample ?? audio.length, audio.length))
+  const padLength = Math.round(sampleRate * PAD_SECONDS)
+  const slice = new Float32Array(end - start + padLength)
+  slice.set(audio.subarray(start, end), 0) // 其余保持 0（静音）
+
+  console.log(`[worker] 选区解码：${end - start} 采样 + ${padLength} 静音 @ ${sampleRate} Hz`)
   const startedAt = performance.now()
   const decoder = new WasmDecoder(sampleRate)
-  console.log(`[worker] 待解码 ${audio.length} 采样 @ ${sampleRate} Hz`)
   try {
-    if (mode) {
-      decoder.setForcedMode(mode, startSecs, endSecs)
-    }
-    for (let offset = 0; offset < audio.length; offset += FEED_CHUNK) {
-      const end = Math.min(offset + FEED_CHUNK, audio.length)
-      const events = decoder.pushAudio(audio.subarray(offset, end)) as DecodeEvent[]
-      for (const event of events) {
-        post({ type: 'event', requestId, event })
-      }
-      post({
-        type: 'progress',
-        requestId,
-        fedSamples: end,
-        totalSamples: audio.length,
-      })
+    if (mode) decoder.setForcedMode(mode, 0, undefined)
+    for (let offset = 0; offset < slice.length; offset += FEED_CHUNK) {
+      const stop = Math.min(offset + FEED_CHUNK, slice.length)
+      const events = decoder.pushAudio(slice.subarray(offset, stop)) as DecodeEvent[]
+      for (const event of events) post({ type: 'event', requestId, event })
+      post({ type: 'progress', requestId, fedSamples: stop, totalSamples: slice.length })
     }
     post({ type: 'done', requestId, elapsedMs: performance.now() - startedAt })
     console.log(`[worker] 解码完成，耗时 ${(performance.now() - startedAt).toFixed(0)} ms`)
@@ -73,27 +133,23 @@ ctx.onmessage = async (e: MessageEvent<MainToWorker>) => {
         post({ type: 'modes', requestId: message.requestId, modes: listModes() as ModeInfo[] })
         break
       }
-      case 'synth': {
+      case 'loadSynth': {
         await ensureReady()
-        // `dev-synth` 构建才有该导出；生产构建下给出明确提示而非崩溃。
-        const mod = (await import('../wasm/slowrx_wasm.js')) as typeof import('../wasm/slowrx_wasm.js') & {
-          synthTestAudio?: (mode: string, withVis: boolean) => Float32Array
-        }
-        if (typeof mod.synthTestAudio !== 'function') {
-          throw new Error('当前 wasm 构建不含合成音频工具（请用 build-wasm.ps1 -Dev 构建）')
-        }
-        const audio = mod.synthTestAudio(message.mode, message.withVis)
-        await runDecode(message.requestId, 11025, audio)
+        const audio = await synthAudio(message.mode, message.withVis)
+        await storeAndReport(message.requestId, 11025, audio)
+        break
+      }
+      case 'loadAudio': {
+        await ensureReady()
+        await storeAndReport(message.requestId, message.sampleRate, message.audio)
         break
       }
       case 'decode': {
-        await runDecode(
+        await decodeSelection(
           message.requestId,
-          message.sampleRate,
-          message.audio,
+          message.startSample,
+          message.endSample,
           message.mode,
-          message.startSecs,
-          message.endSecs,
         )
         break
       }

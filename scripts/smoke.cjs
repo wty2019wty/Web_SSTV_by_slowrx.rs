@@ -20,7 +20,7 @@ if (!fs.existsSync(pkg)) {
   process.exit(1)
 }
 
-const { WasmDecoder, listModes, synthTestAudio } = require(pkg)
+const { WasmDecoder, listModes, synthTestAudio, computeSpectrogram } = require(pkg)
 
 const WORK_RATE = 11025
 const FEED_CHUNK = 32768
@@ -142,6 +142,26 @@ console.log('\n== 静音窗口不应伪造图像 ==')
 const silence = new Float32Array(WORK_RATE * 45)
 const onSilence = decodeAny(silence, { mode: 'robot24', startSecs: 0 })
 check(!onSilence.image, '静音窗口无 ImageComplete')
+
+console.log('\n== 频谱图（STFT）==')
+const specAudio = synthTestAudio('pd120', true)
+const spec = computeSpectrogram(specAudio, WORK_RATE, 0, 0, 0)
+check(!!spec, '计算得到频谱图')
+if (spec) {
+  check(spec.columns > 0, `列数 ${spec.columns} > 0`)
+  check(spec.bins > 0 && spec.bins <= 513, `bin 数 ${spec.bins} 合法`)
+  const data = spec.data()
+  check(data.length === spec.columns * spec.bins, '强度矩阵尺寸 = columns×bins')
+  let max = 0
+  for (const value of data) if (value > max) max = value
+  check(max > 120, `存在高亮像素（最大 ${max}）`)
+  const expectedSpc = spec.hop / spec.sampleRate
+  check(
+    Math.abs(spec.secondsPerColumn - expectedSpc) < 1e-9,
+    `每列时长 ${spec.secondsPerColumn.toFixed(4)}s`,
+  )
+  spec.free()
+}
 
 if (failures > 0) {
   console.error(`\n冒烟测试失败：${failures} 项`)

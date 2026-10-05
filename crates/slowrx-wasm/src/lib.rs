@@ -14,6 +14,7 @@
 //! ```
 
 mod core;
+mod spectrogram;
 
 use core::{CoreDecoder, CoreEvent};
 use wasm_bindgen::prelude::*;
@@ -194,4 +195,87 @@ pub fn list_modes() -> js_sys::Array {
 #[wasm_bindgen(js_name = synthTestAudio)]
 pub fn synth_test_audio(mode: &str, with_vis: bool) -> Result<Vec<f32>, JsValue> {
     core::synth_test_audio(mode, with_vis).ok_or_else(|| JsValue::from_str("无法识别的模式"))
+}
+
+/// 频谱图强度矩阵（列优先、8 位）。
+#[wasm_bindgen]
+pub struct Spectrogram {
+    inner: spectrogram::Spectrogram,
+}
+
+#[wasm_bindgen]
+impl Spectrogram {
+    /// 时间列数。
+    #[wasm_bindgen(getter)]
+    pub fn columns(&self) -> u32 {
+        self.inner.columns()
+    }
+
+    /// 每列的频率 bin 数。
+    #[wasm_bindgen(getter)]
+    pub fn bins(&self) -> u32 {
+        self.inner.bins()
+    }
+
+    /// 帧移（输入采样点）。
+    #[wasm_bindgen(getter)]
+    pub fn hop(&self) -> u32 {
+        self.inner.hop()
+    }
+
+    /// 输入采样率。
+    #[wasm_bindgen(getter, js_name = sampleRate)]
+    pub fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+
+    /// 显示上限频率（Hz）。
+    #[wasm_bindgen(getter, js_name = maxHz)]
+    pub fn max_hz(&self) -> f64 {
+        self.inner.max_hz()
+    }
+
+    /// 每列代表的时间跨度（秒）。
+    #[wasm_bindgen(getter, js_name = secondsPerColumn)]
+    pub fn seconds_per_column(&self) -> f64 {
+        self.inner.seconds_per_column()
+    }
+
+    /// 列优先的强度矩阵，长度 `columns * bins`。
+    pub fn data(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(self.inner.data())
+    }
+}
+
+/// 计算 STFT 频谱图（在 Worker 内调用）。
+///
+/// # Errors
+/// 音频短于一帧或参数非法时抛出错误。
+#[wasm_bindgen(js_name = computeSpectrogram)]
+pub fn compute_spectrogram(
+    samples: &[f32],
+    sample_rate: u32,
+    fft_size: u32,
+    hop: u32,
+    max_hz: f64,
+) -> Result<Spectrogram, JsValue> {
+    // 传 0 表示使用默认参数。
+    let fft_size = if fft_size == 0 {
+        spectrogram::DEFAULT_FFT_SIZE
+    } else {
+        fft_size as usize
+    };
+    let hop = if hop == 0 {
+        spectrogram::DEFAULT_HOP
+    } else {
+        hop as usize
+    };
+    let max_hz = if max_hz <= 0.0 {
+        spectrogram::DEFAULT_MAX_HZ
+    } else {
+        max_hz
+    };
+    spectrogram::Spectrogram::compute(samples, sample_rate, fft_size, hop, max_hz)
+        .map(|inner| Spectrogram { inner })
+        .ok_or_else(|| JsValue::from_str("音频过短或参数非法，无法计算频谱图"))
 }

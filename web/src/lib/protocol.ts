@@ -1,8 +1,14 @@
 // 主线程 <-> 解码 Worker 的消息协议。
 //
-// 设计原则：音频与像素都以二进制（Float32Array / Uint8Array）传递，
-// 主线程与 Worker 之间用 postMessage + transferable，避免 SharedArrayBuffer
-// 带来的 COOP/COEP 部署复杂度（方案 5）。
+// 会话模型：Worker 持有当前载入的 PCM（来自文件或合成），后续的频谱图计算与
+// 选区解码都引用这份音频，避免反复搬运大数组（方案 5、6.3）。
+// 音频与像素均以二进制（Float32Array / Uint8Array）传递，配合 transferable。
+
+/** 时间选区（秒），start < end。 */
+export interface TimeSelection {
+  start: number
+  end: number
+}
 
 /** 由 wasm 侧 `listModes()` 返回的模式元数据。 */
 export interface ModeInfo {
@@ -15,6 +21,18 @@ export interface ModeInfo {
   imageSeconds: number
 }
 
+/** 频谱图信息（强度矩阵列优先）。 */
+export interface SpectrogramInfo {
+  columns: number
+  bins: number
+  hop: number
+  sampleRate: number
+  maxHz: number
+  secondsPerColumn: number
+  /** 长度 columns*bins，列优先 `data[col*bins + bin]`，取值 0–255。 */
+  data: Uint8Array
+}
+
 /** wasm 核心事件在 JS 侧的表示（与 slowrx-wasm/src/lib.rs 一一对应）。 */
 export type DecodeEvent =
   | { type: 'vis'; mode: string; sampleOffset: number; hedrShiftHz: number }
@@ -22,24 +40,34 @@ export type DecodeEvent =
   | { type: 'line'; mode: string; lineIndex: number; rgb: Uint8Array }
   | { type: 'image'; mode: string; width: number; height: number; rgba: Uint8Array }
 
+/** 载入完成后的会话信息。 */
+export interface LoadedInfo {
+  sampleRate: number
+  totalSamples: number
+  /** 总时长（秒）。 */
+  duration: number
+  spectrogram: SpectrogramInfo
+}
+
 /** 主线程 -> Worker。 */
 export type MainToWorker =
   | { type: 'listModes'; requestId: number }
-  | { type: 'synth'; requestId: number; mode: string; withVis: boolean }
+  | { type: 'loadSynth'; requestId: number; mode: string; withVis: boolean }
+  | { type: 'loadAudio'; requestId: number; sampleRate: number; audio: Float32Array }
   | {
       type: 'decode'
       requestId: number
-      sampleRate: number
-      audio: Float32Array
-      /** 提供时走强制模式；否则 VIS 自动识模。 */
+      /** 选区（输入采样点）；缺省为整段。 */
+      startSample?: number
+      endSample?: number
+      /** 提供时走强制模式（选区不含 VIS 头）；否则 VIS 自动识模。 */
       mode?: string
-      startSecs?: number
-      endSecs?: number
     }
 
 /** Worker -> 主线程。 */
 export type WorkerToMain =
   | { type: 'modes'; requestId: number; modes: ModeInfo[] }
+  | ({ type: 'loaded'; requestId: number } & LoadedInfo)
   | { type: 'event'; requestId: number; event: DecodeEvent }
   | { type: 'progress'; requestId: number; fedSamples: number; totalSamples: number }
   | { type: 'done'; requestId: number; elapsedMs: number }

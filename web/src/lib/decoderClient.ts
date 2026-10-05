@@ -1,5 +1,6 @@
 import type {
   DecodeEvent,
+  LoadedInfo,
   MainToWorker,
   ModeInfo,
   WorkerToMain,
@@ -18,10 +19,10 @@ export interface DecodeResult {
 }
 
 interface Pending {
-  resolve: (result: DecodeResult) => void
+  resolve: (message: WorkerToMain, events: DecodeEvent[]) => void
   reject: (error: Error) => void
   events: DecodeEvent[]
-  handlers: DecodeHandlers
+  handlers?: DecodeHandlers
 }
 
 /**
@@ -40,28 +41,29 @@ export class DecoderClient {
     this.worker.onmessage = (e: MessageEvent<WorkerToMain>) => this.handle(e.data)
     this.worker.onerror = (e) => {
       // Worker 脚本层面的致命错误（例如 wasm 加载失败）。
-      for (const [id, p] of this.pending) {
-        p.reject(new Error(`Worker 错误：${e.message}`))
+      const error = new Error(`Worker 错误：${e.message}`)
+      for (const [id, pending] of this.pending) {
+        pending.reject(error)
         this.pending.delete(id)
       }
     }
   }
 
   private handle(message: WorkerToMain): void {
-    // `modes` 由 listModes 的专用监听器处理，这里直接忽略。
-    if (message.type === 'modes') return
     const pending = this.pending.get(message.requestId)
     if (!pending) return
     switch (message.type) {
       case 'event':
         pending.events.push(message.event)
-        pending.handlers.onEvent?.(message.event)
+        pending.handlers?.onEvent?.(message.event)
         break
       case 'progress':
-        pending.handlers.onProgress?.(message.fedSamples, message.totalSamples)
+        pending.handlers?.onProgress?.(message.fedSamples, message.totalSamples)
         break
+      case 'modes':
+      case 'loaded':
       case 'done':
-        pending.resolve({ events: pending.events, elapsedMs: message.elapsedMs })
+        pending.resolve(message, pending.events)
         this.pending.delete(message.requestId)
         break
       case 'error':
@@ -71,67 +73,65 @@ export class DecoderClient {
     }
   }
 
-  private send(message: MainToWorker, transfer?: Transferable[]): void {
-    this.worker.postMessage(message, transfer ?? [])
+  private request(
+    message: MainToWorker,
+    transfer?: Transferable[],
+    handlers?: DecodeHandlers,
+  ): Promise<{ message: WorkerToMain; events: DecodeEvent[] }> {
+    return new Promise((resolve, reject) => {
+      this.pending.set(message.requestId, {
+        resolve: (msg, events) => resolve({ message: msg, events }),
+        reject,
+        events: [],
+        handlers,
+      })
+      this.worker.postMessage(message, transfer ?? [])
+    })
   }
 
   /** 查询 wasm 侧支持的全部模式。 */
   async listModes(): Promise<ModeInfo[]> {
-    return new Promise<ModeInfo[]>((resolve, reject) => {
-      const requestId = this.nextId++
-      const listener = (e: MessageEvent<WorkerToMain>) => {
-        const message = e.data
-        if (message.type === 'modes' && message.requestId === requestId) {
-          this.worker.removeEventListener('message', listener)
-          resolve(message.modes)
-        } else if (message.type === 'error' && message.requestId === requestId) {
-          this.worker.removeEventListener('message', listener)
-          reject(new Error(message.message))
-        }
-      }
-      this.worker.addEventListener('message', listener)
-      this.send({ type: 'listModes', requestId })
+    const { message } = await this.request({ type: 'listModes', requestId: this.nextId++ })
+    if (message.type !== 'modes') throw new Error('协议错误：期望 modes')
+    return message.modes
+  }
+
+  /** 载入 wasm 生成的合成音频（开发自测，需要 dev-synth 构建）。 */
+  async loadSynth(mode: string, withVis: boolean): Promise<LoadedInfo> {
+    const { message } = await this.request({
+      type: 'loadSynth',
+      requestId: this.nextId++,
+      mode,
+      withVis,
     })
+    if (message.type !== 'loaded') throw new Error('协议错误：期望 loaded')
+    return message
   }
 
-  private run(message: MainToWorker, transfer: Transferable[] | undefined, handlers: DecodeHandlers): Promise<DecodeResult> {
-    return new Promise<DecodeResult>((resolve, reject) => {
-      this.pending.set(message.requestId, { resolve, reject, events: [], handlers })
-      this.send(message, transfer)
-    })
-  }
-
-  /** 解码由 wasm 生成的合成音频（开发自测用，需要 dev-synth 构建）。 */
-  decodeSynth(mode: string, withVis: boolean, handlers: DecodeHandlers = {}): Promise<DecodeResult> {
-    return this.run({ type: 'synth', requestId: this.nextId++, mode, withVis }, undefined, handlers)
-  }
-
-  /** 解码一段单声道 f32 音频；`mode` 提供时走强制模式。 */
-  decode(
-    params: {
-      sampleRate: number
-      audio: Float32Array
-      mode?: string
-      startSecs?: number
-      endSecs?: number
-    },
-    handlers: DecodeHandlers = {},
-  ): Promise<DecodeResult> {
+  /** 载入一段单声道 f32 音频（Worker 会保存并计算频谱图）。 */
+  async loadAudio(sampleRate: number, audio: Float32Array): Promise<LoadedInfo> {
     // 复制一份，避免 transfer 后调用方的缓冲区被 detach。
-    const audio = params.audio.slice()
-    return this.run(
-      {
-        type: 'decode',
-        requestId: this.nextId++,
-        sampleRate: params.sampleRate,
-        audio,
-        mode: params.mode,
-        startSecs: params.startSecs,
-        endSecs: params.endSecs,
-      },
-      [audio.buffer],
+    const copy = audio.slice()
+    const { message } = await this.request(
+      { type: 'loadAudio', requestId: this.nextId++, sampleRate, audio: copy },
+      [copy.buffer],
+    )
+    if (message.type !== 'loaded') throw new Error('协议错误：期望 loaded')
+    return message
+  }
+
+  /** 解码选区（缺省整段）；`mode` 提供时走强制模式。 */
+  async decode(
+    params: { startSample?: number; endSample?: number; mode?: string },
+    handlers?: DecodeHandlers,
+  ): Promise<DecodeResult> {
+    const { message, events } = await this.request(
+      { type: 'decode', requestId: this.nextId++, ...params },
+      undefined,
       handlers,
     )
+    if (message.type !== 'done') throw new Error('协议错误：期望 done')
+    return { events, elapsedMs: message.elapsedMs }
   }
 
   dispose(): void {

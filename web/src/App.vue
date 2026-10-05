@@ -1,29 +1,39 @@
 <script setup lang="ts">
-// M2 开发自测界面：在 Worker 内解码一张（合成或文件）SSTV 图像并渲染。
-// 频谱图 / 时间选区 / 麦克风将在 M3–M5 里程碑接入。
+// Web SSTV 解码工具主界面。
+//
+// 流程：载入音频（文件 / 合成）→ Worker 计算频谱图 → 在频谱图上选时间段 →
+// 解码选区（自动识模或强制模式）→ Canvas 渲染 + 下载。
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue'
 import { DecoderClient } from './lib/decoderClient'
-import type { DecodeEvent, ModeInfo } from './lib/protocol'
+import SpectrogramView from './components/SpectrogramView.vue'
+import type { DecodeEvent, LoadedInfo, ModeInfo, TimeSelection } from './lib/protocol'
 
 const client = shallowRef<DecoderClient | null>(null)
 const modes = ref<ModeInfo[]>([])
 const selectedMode = ref('pd120')
-const withVis = ref(true) // true = VIS 自动识模；false = 强制模式（选区不含 VIS）
+const forcedMode = ref(false) // false = VIS 自动识模；true = 按所选模式强制解码
+const synthWithVis = ref(true)
+
+const loaded = ref<LoadedInfo | null>(null)
+const selection = ref<TimeSelection>({ start: 0, end: 1 })
 
 const busy = ref(false)
 const status = ref('就绪')
 const progress = ref(0)
 const elapsedMs = ref<number | null>(null)
 const log = ref<string[]>([])
-const lastImage = ref<{ mode: string; width: number; height: number } | null>(null)
+const hasImage = ref(false)
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 
 const currentMode = computed(() => modes.value.find((m) => m.shortName === selectedMode.value))
+const durationText = computed(() =>
+  loaded.value ? `${loaded.value.duration.toFixed(2)}s @ ${loaded.value.sampleRate} Hz` : '—',
+)
 
 function pushLog(line: string) {
   const time = new Date().toLocaleTimeString()
-  log.value = [`[${time}] ${line}`, ...log.value].slice(0, 50)
+  log.value = [`[${time}] ${line}`, ...log.value].slice(0, 80)
 }
 
 function handleEvent(event: DecodeEvent) {
@@ -53,27 +63,50 @@ function renderImage(event: Extract<DecodeEvent, { type: 'image' }>) {
   // 复制成带 ArrayBuffer 的 Uint8ClampedArray，满足 ImageData 的类型要求。
   const clamped = new Uint8ClampedArray(event.rgba)
   ctx.putImageData(new ImageData(clamped, event.width, event.height), 0, 0)
-  lastImage.value = { mode: event.mode, width: event.width, height: event.height }
+  hasImage.value = true
 }
 
-async function runSynth() {
-  const c = client.value
-  if (!c || busy.value) return
+function clearCanvas() {
+  const canvas = canvasRef.value
+  if (canvas) {
+    canvas.width = 0
+    canvas.height = 0
+  }
+  hasImage.value = false
+}
+
+function beginJob(message: string) {
   busy.value = true
   progress.value = 0
   elapsedMs.value = null
-  status.value = '正在生成合成音频并解码…'
+  status.value = message
+}
+
+function endJob(result: { elapsedMs: number }) {
+  elapsedMs.value = result.elapsedMs
+  status.value = `完成（${result.elapsedMs.toFixed(0)} ms）`
+  busy.value = false
+}
+
+function failJob(error: unknown) {
+  status.value = `失败：${error instanceof Error ? error.message : String(error)}`
+  busy.value = false
+}
+
+function onProgress(fed: number, total: number) {
+  progress.value = total > 0 ? Math.round((fed / total) * 100) : 0
+}
+
+async function loadSynth() {
+  const clientValue = client.value
+  if (!clientValue || busy.value) return
+  beginJob('正在生成合成音频并计算频谱图…')
   try {
-    const result = await c.decodeSynth(selectedMode.value, withVis.value, {
-      onEvent: handleEvent,
-      onProgress: (fed, total) => {
-        progress.value = total > 0 ? Math.round((fed / total) * 100) : 0
-      },
-    })
-    elapsedMs.value = result.elapsedMs
-    status.value = `完成（${result.elapsedMs.toFixed(0)} ms）`
+    const info = await clientValue.loadSynth(selectedMode.value, synthWithVis.value)
+    applyLoaded(info)
+    status.value = `已载入合成音频（${info.duration.toFixed(1)}s）`
   } catch (error) {
-    status.value = `失败：${error instanceof Error ? error.message : String(error)}`
+    failJob(error)
   } finally {
     busy.value = false
   }
@@ -83,39 +116,68 @@ async function onFileChange(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file || !client.value || busy.value) return
-  busy.value = true
-  progress.value = 0
-  elapsedMs.value = null
-  status.value = `正在解析 ${file.name}…`
+  beginJob(`正在解析 ${file.name}…`)
   try {
     const arrayBuffer = await file.arrayBuffer()
     const audioContext = new AudioContext()
     const buffer = await audioContext.decodeAudioData(arrayBuffer)
     const mono = toMono(buffer)
     await audioContext.close()
-    status.value = `正在解码（${buffer.sampleRate} Hz，${mono.length} 采样）…`
-    const result = await client.value.decode(
-      {
-        sampleRate: buffer.sampleRate,
-        audio: mono,
-        mode: withVis.value ? undefined : selectedMode.value,
-        startSecs: withVis.value ? undefined : 0,
-      },
-      {
-        onEvent: handleEvent,
-        onProgress: (fed, total) => {
-          progress.value = total > 0 ? Math.round((fed / total) * 100) : 0
-        },
-      },
-    )
-    elapsedMs.value = result.elapsedMs
-    status.value = `完成（${result.elapsedMs.toFixed(0)} ms）`
+    const info = await client.value.loadAudio(buffer.sampleRate, mono)
+    applyLoaded(info)
+    status.value = `已载入 ${file.name}（${info.duration.toFixed(1)}s @ ${info.sampleRate} Hz）`
   } catch (error) {
-    status.value = `失败：${error instanceof Error ? error.message : String(error)}`
+    failJob(error)
   } finally {
     busy.value = false
     input.value = ''
   }
+}
+
+function applyLoaded(info: LoadedInfo) {
+  loaded.value = info
+  selection.value = { start: 0, end: info.duration }
+  clearCanvas()
+}
+
+async function decodeSelection() {
+  const clientValue = client.value
+  if (!clientValue || busy.value || !loaded.value) return
+  const startSample = Math.round(selection.value.start * loaded.value.sampleRate)
+  const endSample = Math.round(selection.value.end * loaded.value.sampleRate)
+  if (endSample <= startSample) {
+    status.value = '选区为空'
+    return
+  }
+  clearCanvas()
+  beginJob('正在解码选区…')
+  try {
+    const result = await clientValue.decode(
+      {
+        startSample,
+        endSample,
+        mode: forcedMode.value ? selectedMode.value : undefined,
+      },
+      { onEvent: handleEvent, onProgress },
+    )
+    endJob(result)
+  } catch (error) {
+    failJob(error)
+  }
+}
+
+function download() {
+  const canvas = canvasRef.value
+  if (!canvas || !hasImage.value) return
+  canvas.toBlob((blob) => {
+    if (!blob) return
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `sstv-${Date.now()}.png`
+    anchor.click()
+    URL.revokeObjectURL(url)
+  })
 }
 
 /** 多声道取平均，得到单声道 f32。 */
@@ -132,10 +194,10 @@ function toMono(buffer: AudioBuffer): Float32Array {
 }
 
 onMounted(async () => {
-  const c = new DecoderClient()
-  client.value = c
+  const value = new DecoderClient()
+  client.value = value
   try {
-    modes.value = await c.listModes()
+    modes.value = await value.listModes()
     if (modes.value.length > 0) selectedMode.value = modes.value[0].shortName
     pushLog(`已加载 ${modes.value.length} 个模式`)
   } catch (error) {
@@ -154,6 +216,7 @@ onBeforeUnmount(() => {
     <p class="subtitle">解码核心为 slowrx（Rust → WASM），全部在浏览器本地完成，不上传音频。</p>
 
     <section class="panel">
+      <h2>1. 音频来源</h2>
       <div class="row">
         <label>
           模式
@@ -164,32 +227,47 @@ onBeforeUnmount(() => {
           </select>
         </label>
         <label class="check">
-          <input v-model="withVis" type="checkbox" :disabled="busy" />
-          VIS 自动识模（取消则按所选模式强制解码）
+          <input v-model="synthWithVis" type="checkbox" :disabled="busy" />
+          合成音频包含 VIS 头
         </label>
-      </div>
-
-      <div class="row">
-        <button :disabled="busy" @click="runSynth">解码合成音频</button>
+        <button :disabled="busy" @click="loadSynth">生成合成音频</button>
         <label class="file">
           选择音频文件
           <input type="file" accept="audio/*" :disabled="busy" @change="onFileChange" />
         </label>
       </div>
-
-      <p class="status">{{ status }}</p>
-      <div class="progress"><div class="bar" :style="{ width: progress + '%' }" /></div>
       <p v-if="currentMode" class="hint">
-        当前模式标称图像时长约 {{ currentMode.imageSeconds.toFixed(1) }} 秒
-        <span v-if="elapsedMs !== null">· 解码耗时 {{ elapsedMs.toFixed(0) }} ms</span>
+        {{ currentMode.name }} 标称图像时长约 {{ currentMode.imageSeconds.toFixed(1) }} 秒
+        · 已载入 {{ durationText }}
       </p>
     </section>
 
     <section class="panel">
-      <h2>解码结果</h2>
-      <p v-if="lastImage" class="hint">
-        {{ lastImage.mode }} · {{ lastImage.width }}×{{ lastImage.height }}
-      </p>
+      <h2>2. 频谱图与时间选区</h2>
+      <SpectrogramView
+        v-model="selection"
+        :spectrogram="loaded?.spectrogram ?? null"
+        :duration="loaded?.duration ?? 1"
+      />
+    </section>
+
+    <section class="panel">
+      <h2>3. 解码</h2>
+      <div class="row">
+        <label class="check">
+          <input v-model="forcedMode" type="checkbox" :disabled="busy" />
+          强制模式（选区不含 VIS 头时使用）
+        </label>
+        <button :disabled="busy || !loaded" @click="decodeSelection">解码选区</button>
+        <button :disabled="busy || !hasImage" @click="download">下载 PNG</button>
+      </div>
+      <p class="status">{{ status }}</p>
+      <div class="progress"><div class="bar" :style="{ width: progress + '%' }" /></div>
+      <p v-if="elapsedMs !== null" class="hint">解码耗时 {{ elapsedMs.toFixed(0) }} ms</p>
+    </section>
+
+    <section class="panel">
+      <h2>4. 解码结果</h2>
       <canvas ref="canvasRef" class="preview" />
     </section>
 
@@ -204,7 +282,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .app {
-  max-width: 900px;
+  max-width: 1000px;
   margin: 0 auto;
   padding: 1.5rem;
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;

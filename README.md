@@ -1,6 +1,6 @@
 # Web 端 SSTV 解码工具
 
-在浏览器中运行的 SSTV（慢扫描电视）解码工具。解码核心复用 [`slowrx`](https://github.com/jasonherald/slowrx.rs)
+在浏览器中运行的 SSTV（慢扫描电视）解码工具。解码核心复用 [`slowrx`](https://github.com/wty2019wty/slowrx.rs/tree/sstv-web)
 （Rust 库），编译为 WebAssembly 在**本地**运行；音频不上传任何服务器。
 
 配套方案文档见 `slowrx` 仓库 `sstv-web` 分支的 `docs/`（本仓库不复制）。
@@ -77,17 +77,19 @@ cd web
 npm run e2e
 ```
 
-实测（本机，wasm SIMD128）：PD120 合成音频 → 出图约 **5.8–5.9 s**（Node 5.7 s /
-浏览器 5.9 s），与方案文档中“wasm SIMD 约 2.5–2.6× native”的预期一致。
+实测（本机，wasm SIMD128）：PD120 合成音频 → 出图约 **6.0–6.4 s**（Node 6.0–6.4 s /
+无头 Edge 5.9–6.1 s），与方案文档中“wasm SIMD 约 2.5–2.6× native”的预期一致。
 
 ## 里程碑状态
 
 - [x] **M2** `slowrx-wasm` 包装 crate + Worker：Worker 内解码一张合成分片出图
-- [~] **M3** 音频文件输入已接入（`decodeAudioData` → 单声道 f32）；缺少选取/补静音 UI
-- [~] **M4** 强制模式路径（`setForcedMode`）已打通并验证
-- [ ] **M5** 频谱图 + 时间选区交互
-- [ ] **M6** 结果渲染/下载/状态完善
-- [ ] **M7** V8 性能收尾
+- [x] **M3** 音频输入：文件（`decodeAudioData` → 单声道 f32）与合成音频；选区由 Worker
+  切片刻取并**末尾补 1 s 静音**（方案 4.3）
+- [x] **M4** 强制模式路径（`setForcedMode`）已打通并验证
+- [x] **M5** 频谱图 + 时间选区：Worker 内用 wasm 的 rustfft 算 STFT，主线程双层 Canvas
+  渲染，支持缩放/平移与选区创建/移动/两端缩放
+- [x] **M6** 结果 Canvas 渲染 + PNG 下载 + 状态/进度反馈（进度为估算，见设计要点）
+- [ ] **M7** V8 性能收尾（含 `wasm-opt` 体积优化、无头浏览器耗时复测）
 
 ## 设计要点
 
@@ -96,3 +98,8 @@ npm run e2e
 - 强制模式必须携带解码窗口；WS 自动识模与强制模式两条路径在 UI 上可切换。
 - wasm 目标依赖 `rustfft/wasm_simd` + `-C target-feature=+simd128`，实测有效。
 - 音频用 `postMessage` + transferable 传递，不引入 SharedArrayBuffer。
+- 会话模型：Worker 持有当前 PCM，频谱图与选区解码都引用它，避免重复搬运大数组；
+  选区解码统一在 Worker 内切片 + 补静音。
+- 频谱图为 8 位强度矩阵（列优先），绝对 dBFS 参考归一化 + 伽马校正，传输/内存开销小。
+- 已知体积：wasm 约 1.05 MB（生产）/ 1.08 MB（dev-synth），M7 可用 `wasm-opt` 压缩。
+- 浏览器实测：无头 Edge 与 Node 下 PD120 均约 6 s（曾观察到并行压测时升高，属测量干扰）。
