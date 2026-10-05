@@ -208,6 +208,9 @@ function startLive(requestId: number, sampleRate: number): void {
   const hop = Math.max(1, fftSize >> 1)
   const spec = new StreamingSpectrogram(sampleRate, fftSize, hop, LIVE_MAX_HZ)
   const decoder = new WasmDecoder(sampleRate)
+  // 实时接收启用渐进（逐行）解码：锁定同步后每收够一行就解一行并回传
+  // `line` 事件；整图末尾用完整 sync 重解一次保证精度（见 slowrx decoder.rs）。
+  decoder.setProgressive(true)
   live = {
     sampleRate,
     decoder,

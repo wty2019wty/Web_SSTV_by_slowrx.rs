@@ -766,28 +766,13 @@ impl SstvDecoder {
                             &mut out,
                         );
                         if finished {
-                            // 用最终估计算图像结束位置，把它之后的音频交给新的
-                            // VIS 检测器（可能紧跟下一张）。
-                            let total_frames = radio_frames_per_image(d.spec);
-                            let (rate, skip) = d.sync_est.unwrap_or((
-                                f64::from(crate::resample::WORKING_SAMPLE_RATE_HZ),
-                                0,
-                            ));
-                            let image_end = (skip as f64
-                                + f64::from(total_frames) * d.spec.line_seconds * rate)
-                                .max(0.0) as usize;
-                            let carry_from = image_end.min(d.audio.len());
-                            let carry_audio = d.audio[carry_from..].to_vec();
-                            let image = d.image;
-                            out.push(SstvEvent::ImageComplete {
-                                image,
-                                partial: false,
-                            });
-                            Self::restart_vis_detection(
-                                &mut self.vis,
-                                self.working_samples_emitted,
-                                &carry_audio,
-                            );
+                            // 预览已经逐行出全图。最终整图解码交给下面的批处理
+                            // 路径：用**整段** sync 轨道重跑 find_sync 并整图重解，
+                            // 保证输出与离线批处理逐像素一致（预览行用的是局部
+                            // 估计，可能略有偏差，会被这次重解覆盖）。关闭渐进
+                            // 标志后放回状态，下轮循环即走批处理。
+                            d.progressive = false;
+                            self.state = State::Decoding(Box::new(d));
                             remaining = &[];
                             continue;
                         }

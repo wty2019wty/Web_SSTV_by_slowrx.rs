@@ -16,6 +16,7 @@ import type {
 } from './lib/protocol'
 import SpectrogramView from './components/SpectrogramView.vue'
 import WaterfallView from './components/WaterfallView.vue'
+import LiveImageView from './components/LiveImageView.vue'
 
 /** 一张已解码图像。 */
 interface DecodedImage {
@@ -64,6 +65,7 @@ const liveStatus = ref('未开始')
 const liveElapsed = ref(0)
 const liveImageCount = ref(0)
 const waterfall = ref<InstanceType<typeof WaterfallView> | null>(null)
+const liveImage = ref<InstanceType<typeof LiveImageView> | null>(null)
 const capture = shallowRef<LiveCapture | null>(null)
 let liveTimer = 0
 let liveStartedAt = 0
@@ -160,10 +162,32 @@ function onProgress(fed: number, total: number) {
 
 // --- 实时接收（麦克风） -------------------------------------------------
 
-/** 实时解码事件：图像计入实时计数，其余复用文件解码的事件处理。 */
+/** 实时解码事件：逐行绘制实时图像，图像计入实时计数，其余复用文件解码处理。 */
 function handleLiveEvent(event: DecodeEvent) {
-  if (event.type === 'image') liveImageCount.value++
-  handleEvent(event)
+  switch (event.type) {
+    case 'vis':
+      // 新一张图的 VIS：清空实时图像，准备逐行绘制。
+      liveImage.value?.clear()
+      handleEvent(event)
+      break
+    case 'line': {
+      if (event.lineIndex === 0) {
+        const meta = modes.value.find((m) => m.shortName === event.mode)
+        const width = meta?.width ?? Math.floor(event.rgb.length / 3)
+        const height = meta?.height ?? 0
+        if (width > 0 && height > 0) liveImage.value?.begin(event.mode, width, height)
+      }
+      liveImage.value?.pushLine(event.lineIndex, event.rgb)
+      break
+    }
+    case 'image':
+      liveImageCount.value++
+      handleEvent(event)
+      break
+    default:
+      handleEvent(event)
+      break
+  }
 }
 
 /** 采集到一块音频：会话已建立就转发给 Worker，否则暂存待补投。 */
@@ -191,6 +215,7 @@ async function startLiveReceive() {
   livePendingChunks = []
   results.value = []
   liveImageCount.value = 0
+  liveImage.value?.clear()
   try {
     const cap = new LiveCapture()
     capture.value = cap
@@ -594,9 +619,11 @@ onBeforeUnmount(() => {
           :seconds-per-column="liveInfo?.secondsPerColumn ?? 0"
           :active="liveActive"
         />
+        <LiveImageView ref="liveImage" />
         <p class="hint">
           需要 HTTPS 或 localhost；已关闭回声消除/降噪/自动增益，避免破坏 SSTV 信号。
-          接收到的图像会加入下方「解码结果」画廊。
+          检测到 VIS 后会逐行绘制，整张收完再用完整同步重解一遍（最终图与离线解码一致），
+          结果同时加入下方「解码结果」画廊。
         </p>
       </template>
     </section>
