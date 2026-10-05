@@ -6,6 +6,11 @@
 配套方案文档见 `slowrx` 仓库 `sstv-web` 分支的 `docs/`（本仓库不复制）。
 
 ---
+## 预览图片
+
+![Web 端 SSTV 解码工具界面](img/Web-SSTV-解码工具.png)
+
+---
 
 ## 目录结构
 
@@ -24,6 +29,8 @@
 │       ├── core.rs            # 纯 Rust 解码封装（可原生测试）
 │       └── lib.rs             # #[wasm_bindgen] 绑定层
 ├── scripts/smoke.cjs          # Node 冒烟测试（加载 wasm 解码合成音频）
+├── img/
+│   └── Web-SSTV-解码工具.png   # README 展示截图
 └── web/                       # Vite + Vue 3 前端
     ├── public/
     │   └── live-capture.worklet.js     # 麦克风采集 AudioWorklet（原样拷贝）
