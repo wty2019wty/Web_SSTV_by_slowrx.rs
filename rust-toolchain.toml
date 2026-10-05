@@ -1,0 +1,7 @@
+# 固定工具链版本。方案文档附录 B 记录：1.95.0 已安装 wasm 目标，
+# 而系统默认 stable（当前 1.96）默认不含 wasm std，故显式固定。
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

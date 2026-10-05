@@ -1,0 +1,5 @@
+# 仅在编译 wasm32 目标时开启 WASM SIMD128。
+# rustfft 的 wasm_simd feature 由 crates/slowrx-wasm 按目标平台启用，
+# 这里补齐编译器侧的 target-feature。
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

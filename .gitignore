@@ -3,6 +3,16 @@
 .reasonix/
 
 
+# Rust
+/target/
+
+# wasm 构建产物（由 build-wasm.ps1 生成）
+/web/src/wasm/
+/pkg-node/
+
+# 冒烟测试输出
+/out/
+
 # Node
 node_modules/
 dist/
@@ -16,3 +26,5 @@ dist/
 # Python
 __pycache__/
 *.py[cod]
+
+

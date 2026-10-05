@@ -1,0 +1,24 @@
+{
+  "name": "web-sstv",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Web 端 SSTV 解码工具前端（Vite + Vue 3）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "e2e": "node scripts/e2e.mjs"
+  },
+  "dependencies": {
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.0",
+    "puppeteer-core": "^25.12.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0",
+    "vue-tsc": "^2.2.0"
+  }
+}

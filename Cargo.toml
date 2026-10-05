@@ -1,0 +1,19 @@
+# Web 端 SSTV 工具的工作区。
+#
+# - crates/slowrx-wasm：把 slowrx 解码核心包装成 WebAssembly（wasm-bindgen）。
+#
+# 依赖的 slowrx 来自 fork 的 sstv-web 分支（含强制模式 / 解码窗口 #113/#114）。
+[workspace]
+resolver = "2"
+members = ["crates/slowrx-wasm"]
+
+# 与方案文档附录 A 的基准配置保持一致，保证 wasm 产物尽可能小、尽可能快。
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# 开发/测试构建下优化第三方依赖（rustfft 的 FFT 是绝对热点），
+# 否则 debug 跑一张 PD120 要一分钟以上。
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,33 @@
+[package]
+name = "slowrx-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "WebAssembly bindings for the slowrx SSTV decoder"
+license = "MIT"
+
+[lib]
+# cdylib 供 wasm-pack / wasm-bindgen 生成 JS 绑定；
+# rlib 供原生单元测试与后续 Rust 侧复用。
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+slowrx = { git = "https://github.com/wty2019wty/slowrx.rs", branch = "sstv-web" }
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+
+# 只在 wasm 目标上启用 rustfft 的 SIMD 内核，避免影响原生构建。
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rustfft = { version = "6", features = ["wasm_simd"] }
+
+[dev-dependencies]
+# 仅测试构建启用 slowrx 的合成编码器，用于原生回归测试。
+slowrx = { git = "https://github.com/wty2019wty/slowrx.rs", branch = "sstv-web", features = [
+    "test-support",
+] }
+
+[features]
+default = []
+# 开发用：暴露合成测试音频的生成函数（同时启用 slowrx/test-support）。
+# 生产构建不要开启，以免把测试编码器打进 wasm。
+dev-synth = ["slowrx/test-support"]
