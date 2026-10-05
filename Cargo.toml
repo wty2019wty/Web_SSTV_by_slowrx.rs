@@ -12,6 +12,9 @@ members = ["crates/slowrx-wasm"]
 opt-level = 3
 lto = true
 codegen-units = 1
+# 体积收尾：wasm 不需要 panic 展开，去掉符号表。
+panic = "abort"
+strip = "symbols"
 
 # 开发/测试构建下优化第三方依赖（rustfft 的 FFT 是绝对热点），
 # 否则 debug 跑一张 PD120 要一分钟以上。

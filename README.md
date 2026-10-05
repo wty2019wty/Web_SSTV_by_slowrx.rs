@@ -23,10 +23,14 @@
 └── web/                       # Vite + Vue 3 前端
     ├── src/
     │   ├── workers/decoder.worker.ts   # 解码 Worker（wasm 在这里运行）
+    │   ├── components/SpectrogramView.vue
     │   ├── lib/{protocol,decoderClient}.ts
     │   ├── wasm/              # 构建产物（gitignore，由 build-wasm.ps1 生成）
     │   └── App.vue
-    └── scripts/e2e.mjs        # 浏览器端到端测试（本机 Edge/Chrome）
+    └── scripts/
+        ├── e2e.mjs            # 浏览器端到端测试（本机 Edge/Chrome）
+        ├── bench.mjs          # 浏览器 V8 性能基准
+        └── optimize-wasm.mjs  # binaryen（wasm-opt -Oz）体积优化
 ```
 
 ## 环境要求
@@ -36,6 +40,7 @@
 | Rust | 1.95.0 | 由 `rust-toolchain.toml` 固定；默认 stable 未必装 wasm 目标 |
 | wasm-bindgen-cli | **0.2.129** | 必须与 `wasm-bindgen` crate 版本一致 |
 | Node.js | 24.x | 见 `node_env.ps1` |
+| binaryen（npm） | 132.x | `build-wasm.ps1` 用它做 `wasm-opt -Oz` 体积优化（`web` 的 devDependency） |
 | wasm32-unknown-unknown | — | 已随工具链配置声明 |
 
 安装 wasm-bindgen-cli：
@@ -94,10 +99,34 @@ node scripts\smoke.cjs
 # 浏览器端到端：Vite + 本机 Edge/Chrome，Worker 内解码后断言 Canvas 出图
 cd web
 npm run e2e
+
+# 浏览器 V8 性能基准：各模式合成音频的解码耗时
+npm run bench
 ```
 
-实测（本机，wasm SIMD128）：PD120 合成音频 → 出图约 **6.0–6.4 s**（Node 6.0–6.4 s /
-无头 Edge 5.9–6.1 s），与方案文档中“wasm SIMD 约 2.5–2.6× native”的预期一致。
+构建脚本会在 wasm-bindgen 之后自动用 binaryen 做 `wasm-opt -Oz` 体积优化
+（`build-wasm.ps1 -NoOpt` 可跳过）。体积对比：
+
+| 产物 | 大小 |
+|---|---|
+| 优化前（wasm-bindgen 输出，dev-synth） | 1055 KB |
+| + `panic=abort` / `strip` | 970 KB |
+| + `wasm-opt -Oz` | **683 KB**（dev-synth） / **669 KB**（生产，gzip 193 KB） |
+
+### 浏览器 V8 实测（无头 Edge，wasm SIMD128，仅解码循环）
+
+| 模式 | 图像时长 | 解码耗时 | 与 wasmtime(Cranelift) 基线 |
+|---|---|---|---|
+| PD-120 | 124 s | 5.95 s | 5.77 s |
+| PD-180 | 180 s | 7.55 s | 7.53 s |
+| PD-240 | 240 s | 9.14 s | 9.25 s |
+| Robot 36 | 36 s | 2.13 s | ~2–3 s |
+| Robot 72 | 72 s | 3.70 s | — |
+| Scottie 1 | 110 s | 4.77 s | — |
+| Martin 1 | 114 s | 5.91 s | — |
+
+结论：**V8 与 wasmtime(Cranelift) 基本持平（差异 < ~3%）**，方案文档中“wasm SIMD 约
+2.5–2.6× native、PD120≈5.77 s”的预期在浏览器端得到确认；`PIXEL_FFT_STRIDE` 无需调整。
 
 ## 里程碑状态
 
@@ -111,7 +140,9 @@ npm run e2e
   渲染，支持缩放/平移（滚轮 + **横向滚动条**）与选区创建/移动/两端缩放
 - [x] **M6** 结果渲染 + 逐张 PNG 下载 + 状态/进度；**默认自动识模**（一次可解出多张，
   结果画廊展示）；音频播放（整段 / 选区）、播放头同步、点击频谱图定位
-- [ ] **M7** V8 性能收尾（含 `wasm-opt` 体积优化、无头浏览器耗时复测）
+- [x] **M7** V8 性能收尾：浏览器实测各模式耗时（V8 ≈ Cranelift）；`panic=abort`+`strip`
+  + binaryen `wasm-opt -Oz` 把 wasm 从 1055 KB 压到 **683 KB（-35%）**；`PIXEL_FFT_STRIDE`
+  无需调整
 
 ## 设计要点
 
@@ -131,5 +162,7 @@ npm run e2e
     「起点 / 终点」决定语义（`starting_at` / `ending_at`），不显示范围选区；从锚点喂到
     文件末尾 + 末尾静音，长度由模式标称时长决定。
 - 频谱图为 8 位强度矩阵（列优先），绝对 dBFS 参考归一化 + 伽马校正，传输/内存开销小。
-- 已知体积：wasm 约 1.05 MB（生产）/ 1.08 MB（dev-synth），M7 可用 `wasm-opt` 压缩。
-- 浏览器实测：无头 Edge 与 Node 下 PD120 均约 6 s（曾观察到并行压测时升高，属测量干扰）。
+- 体积：`panic=abort` + `strip` + binaryen `wasm-opt -Oz` 后生产版约 **669 KB**
+  （gzip 193 KB），dev-synth 版约 683 KB；`build-wasm.ps1 -NoOpt` 可跳过优化。
+- 性能：浏览器 V8 与 wasmtime(Cranelift) 基本持平；PD120≈5.9 s、PD180≈7.6 s、
+  PD240≈9.1 s（SIMD128）。详见上面的基准表。

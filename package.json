@@ -9,6 +9,7 @@
     "preview": "npm --prefix web run preview",
     "typecheck": "npm --prefix web run typecheck",
     "e2e": "npm --prefix web run e2e",
+    "bench": "npm --prefix web run bench",
     "install:web": "npm --prefix web install",
     "wasm": "powershell -NoProfile -ExecutionPolicy Bypass -File build-wasm.ps1 -Dev",
     "wasm:prod": "powershell -NoProfile -ExecutionPolicy Bypass -File build-wasm.ps1"
