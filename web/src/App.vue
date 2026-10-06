@@ -678,7 +678,12 @@ onMounted(async () => {
   client.value = value
   try {
     modes.value = await value.listModes()
-    if (modes.value.length > 0) synthMode.value = modes.value[0].shortName
+    if (modes.value.length > 0) {
+      // 默认合成模式固定 PD-120（与上方初值一致），不随模式表顺序变化。
+      synthMode.value = modes.value.some((m) => m.shortName === 'pd120')
+        ? 'pd120'
+        : modes.value[0].shortName
+    }
     pushLog(`已加载 ${modes.value.length} 个模式`)
   } catch (error) {
     status.value = `初始化失败：${error instanceof Error ? error.message : String(error)}`

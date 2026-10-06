@@ -1,4 +1,6 @@
-//! Synthetic encode → decode round-trip for PD-family modes (PD120, PD180, PD240).
+//! Synthetic encode → decode round-trip for every supported mode
+//! (PD 50/90/120/160/180/240/290, Robot 24/36/72, Scottie 1/2/DX,
+//! Martin 1/2, Wraase SC2-180).
 
 #![cfg(feature = "test-support")]
 #![allow(clippy::expect_used, clippy::cast_possible_truncation)]
@@ -38,12 +40,7 @@ fn run_roundtrip(mode: SstvMode) {
     let (w, h, ycrcb) = test_image(mode);
 
     // Build VIS + image audio.
-    let vis_code = match mode {
-        SstvMode::Pd120 => 0x5F,
-        SstvMode::Pd180 => 0x60,
-        SstvMode::Pd240 => 0x61,
-        _ => unreachable!(),
-    };
+    let vis_code = slowrx::for_mode(mode).vis_code;
     let mut audio = slowrx::__test_support::vis::synth_vis(vis_code, 0.0);
     audio.extend(slowrx::__test_support::mode_pd::encode_pd(mode, &ycrcb));
     // Padding to absorb resampler group delay.
@@ -135,12 +132,7 @@ fn test_robot_image(mode: SstvMode) -> (u32, u32, Vec<[u8; 3]>) {
 fn run_robot_roundtrip(mode: SstvMode) {
     let (w, h, ycrcb) = test_robot_image(mode);
 
-    let vis_code = match mode {
-        SstvMode::Robot24 => 0x04,
-        SstvMode::Robot36 => 0x08,
-        SstvMode::Robot72 => 0x0C,
-        _ => unreachable!(),
-    };
+    let vis_code = slowrx::for_mode(mode).vis_code;
     let mut audio = slowrx::__test_support::vis::synth_vis(vis_code, 0.0);
     audio.extend(slowrx::__test_support::mode_robot::encode_robot(
         mode, &ycrcb,
@@ -192,8 +184,23 @@ fn run_robot_roundtrip(mode: SstvMode) {
 }
 
 #[test]
+fn pd50_roundtrip() {
+    run_roundtrip(SstvMode::Pd50);
+}
+
+#[test]
+fn pd90_roundtrip() {
+    run_roundtrip(SstvMode::Pd90);
+}
+
+#[test]
 fn pd120_roundtrip() {
     run_roundtrip(SstvMode::Pd120);
+}
+
+#[test]
+fn pd160_roundtrip() {
+    run_roundtrip(SstvMode::Pd160);
 }
 
 #[test]
@@ -204,6 +211,11 @@ fn pd180_roundtrip() {
 #[test]
 fn pd240_roundtrip() {
     run_roundtrip(SstvMode::Pd240);
+}
+
+#[test]
+fn pd290_roundtrip() {
+    run_roundtrip(SstvMode::Pd290);
 }
 
 #[test]
@@ -253,14 +265,7 @@ fn test_scottie_image(mode: SstvMode) -> (u32, u32, Vec<[u8; 3]>) {
 fn run_scottie_roundtrip(mode: SstvMode) {
     let (w, h, rgb) = test_scottie_image(mode);
 
-    let vis_code = match mode {
-        SstvMode::Scottie1 => 0x3C,
-        SstvMode::Scottie2 => 0x38,
-        SstvMode::ScottieDx => 0x4C,
-        SstvMode::Martin1 => 0x2C,
-        SstvMode::Martin2 => 0x28,
-        _ => unreachable!(),
-    };
+    let vis_code = slowrx::for_mode(mode).vis_code;
     let mut audio = slowrx::__test_support::vis::synth_vis(vis_code, 0.0);
     audio.extend(slowrx::__test_support::mode_scottie::encode_scottie(
         mode, &rgb,
@@ -326,4 +331,9 @@ fn martin1_roundtrip() {
 #[test]
 fn martin2_roundtrip() {
     run_scottie_roundtrip(SstvMode::Martin2);
+}
+
+#[test]
+fn wraase_sc2_180_roundtrip() {
+    run_scottie_roundtrip(SstvMode::WraaseSc2_180);
 }

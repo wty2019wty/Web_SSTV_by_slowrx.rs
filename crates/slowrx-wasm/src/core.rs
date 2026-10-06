@@ -369,9 +369,13 @@ mod tests {
         let modes = list_modes();
         let shorts: Vec<_> = modes.iter().map(|m| m.short_name).collect();
         for want in [
+            "pd50",
+            "pd90",
             "pd120",
+            "pd160",
             "pd180",
             "pd240",
+            "pd290",
             "robot24",
             "robot36",
             "robot72",
@@ -380,6 +384,7 @@ mod tests {
             "scottiedx",
             "martin1",
             "martin2",
+            "sc2180",
         ] {
             assert!(shorts.contains(&want), "缺少模式 {want}");
         }

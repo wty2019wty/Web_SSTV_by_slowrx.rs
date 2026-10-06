@@ -9,9 +9,9 @@
 //! 判据是**边缘列的平均色差**：条纹集中在左右边缘列，其色差远高于图像
 //! 内部；跟踪生效后边缘列应回到与内部列同量级。整体平均色差作为兜底。
 //!
-//! 覆盖全部 11 个模式（四种通道布局）：PD 系列（行对 + YCrCb）、Robot
+//! 覆盖全部 16 个模式（四种通道布局）：PD 系列（行对 + YCrCb）、Robot
 //! 系列（逐行 + YUV）、Scottie 系列（行中同步 + RGB）、Martin 系列
-//! （行首同步 + RGB）。
+//! （行首同步 + RGB）、Wraase SC2-180（行首同步 + RGB、R→G→B 顺序）。
 
 #![cfg(feature = "test-support")]
 #![allow(
@@ -164,8 +164,20 @@ fn run_drifted(mode: SstvMode) {
 }
 
 #[test]
+fn pd50_drifted_timing() {
+    run_drifted(SstvMode::Pd50);
+}
+#[test]
+fn pd90_drifted_timing() {
+    run_drifted(SstvMode::Pd90);
+}
+#[test]
 fn pd120_drifted_timing() {
     run_drifted(SstvMode::Pd120);
+}
+#[test]
+fn pd160_drifted_timing() {
+    run_drifted(SstvMode::Pd160);
 }
 #[test]
 fn pd180_drifted_timing() {
@@ -174,6 +186,10 @@ fn pd180_drifted_timing() {
 #[test]
 fn pd240_drifted_timing() {
     run_drifted(SstvMode::Pd240);
+}
+#[test]
+fn pd290_drifted_timing() {
+    run_drifted(SstvMode::Pd290);
 }
 #[test]
 fn robot24_drifted_timing() {
@@ -206,4 +222,8 @@ fn martin1_drifted_timing() {
 #[test]
 fn martin2_drifted_timing() {
     run_drifted(SstvMode::Martin2);
+}
+#[test]
+fn wraase_sc2_180_drifted_timing() {
+    run_drifted(SstvMode::WraaseSc2_180);
 }

@@ -13,21 +13,25 @@
 
 ## Status
 
-🛰️ **0.5.2 — V2.4 published.** PD120, PD180, PD240, Robot 24, Robot 36, Robot 72, Scottie 1, Scottie 2, Scottie DX, Martin 1, and Martin 2 decoding from raw audio. All four V2 mode families landed; the [V2 roadmap](https://github.com/jasonherald/slowrx.rs/issues/9) is closed. Post-V2.4 cleanup (code-review audit backlog, [epic #97](https://github.com/jasonherald/slowrx.rs/issues/97)) is in progress.
+🛰️ **0.5.2 — V2.4 published.** PD50, PD90, PD120, PD160, PD180, PD240, PD290, Robot 24, Robot 36, Robot 72, Scottie 1, Scottie 2, Scottie DX, Martin 1, Martin 2, and Wraase SC2-180 decoding from raw audio. All four V2 mode families landed; the [V2 roadmap](https://github.com/jasonherald/slowrx.rs/issues/9) is closed. Post-V2.4 cleanup (code-review audit backlog, [epic #97](https://github.com/jasonherald/slowrx.rs/issues/97)) is in progress.
 
 PD120, PD180, and Robot 36 are validated end-to-end against real-radio
 captures: PD120/PD180 against the ARISS Dec-2017 corpus (6 of 7
 fixtures decode to images visually matching the reference JPGs),
 Robot 36 against the ARISS Fram2 corpus (all 12 fixtures decode to
 images visually matching the reference JPGs — see
-`tests/ariss_fram2_validation.md`). PD240, Robot 24, Robot 72,
-Scottie 1/2/DX, and Martin 1/2 ship with synthetic round-trip coverage
-only — real-radio fixtures for those modes are pending. Robot 24
-inherits Robot 36's real-radio evidence by structural identity (same
-decoder code path, only LineTime differs). Scottie + Martin share an
-RGB-sequential decoder dispatched on `SyncPosition` (Scottie sync
-sits mid-line; Martin sync at line start, the standard SSTV
-convention).
+`tests/ariss_fram2_validation.md`). PD50, PD90, PD160, PD240, PD290,
+Robot 24, Robot 72, Scottie 1/2/DX, Martin 1/2, and Wraase SC2-180
+ship with synthetic round-trip coverage only — real-radio fixtures for
+those modes are pending. Robot 24 inherits Robot 36's real-radio
+evidence by structural identity (same decoder code path, only LineTime
+differs). Scottie + Martin + Wraase share an RGB-sequential decoder
+dispatched on `SyncPosition` (Scottie sync sits mid-line; Martin and
+Wraase sync at line start, the standard SSTV convention) and
+`RgbOrder` (Scottie/Martin send G→B→R, Wraase SC2-180 sends R→G→B).
+PD50/90/120/160/180/240/290 and Wraase SC2-180 timings come from the
+Dayton Paper (JL Barber N7CXI, "Proposal for SSTV Mode
+Specifications", 2000), sourced from the mode authors.
 
 ## Install
 
@@ -109,10 +113,11 @@ samples. Mode coverage:
 
 | Mode family | Shipped |
 |---|---|
-| **PD** | PD120, PD180, PD240 |
+| **PD** | PD50, PD90, PD120, PD160, PD180, PD240, PD290 |
 | **Robot** | Robot 24, Robot 36, Robot 72 |
 | **Scottie** | Scottie 1, Scottie 2, Scottie DX |
 | **Martin** | Martin 1, Martin 2 |
+| **Wraase** | Wraase SC2-180 |
 
 VIS header detection is automatic — feed the decoder audio, get images
 out as they complete.
