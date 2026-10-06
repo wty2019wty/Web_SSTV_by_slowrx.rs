@@ -232,6 +232,11 @@ function handleEvent(event: DecodeEvent) {
     case 'unknownVis':
       pushLog(`未知 VIS 码：0x${event.code.toString(16)}`)
       break
+    case 'mistuning': {
+      const hz = `${event.hedrShiftHz >= 0 ? '+' : ''}${event.hedrShiftHz.toFixed(1)} Hz`
+      pushLog(event.fromVis ? `VIS 自动补偿失谐：${hz}` : `使用失谐兜底：${hz}`)
+      break
+    }
     case 'image':
       addResult(event)
       pushLog(`图像完成：${event.mode} ${event.width}×${event.height}`)

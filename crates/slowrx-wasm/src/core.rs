@@ -29,6 +29,13 @@ pub enum CoreEvent {
         sample_offset: u64,
         hedr_shift_hz: f64,
     },
+    /// 强制模式失谐已确定（VIS 自动补偿 / 使用兜底）。
+    MistuningResolved {
+        /// 采用的电台失谐偏移，单位 Hz。
+        hedr_shift_hz: f64,
+        /// `true` 表示来自 VIS 头（自动补偿），`false` 表示使用调用方兜底值。
+        from_vis: bool,
+    },
     /// 一行扫描线完成（仅在 `emit_lines` 开启时产生）。
     Line {
         mode: &'static str,
@@ -216,6 +223,13 @@ fn convert_event(event: SstvEvent, emit_lines: bool) -> Option<CoreEvent> {
             code,
             sample_offset,
             hedr_shift_hz,
+        }),
+        SstvEvent::MistuningResolved {
+            hedr_shift_hz,
+            from_vis,
+        } => Some(CoreEvent::MistuningResolved {
+            hedr_shift_hz,
+            from_vis,
         }),
         SstvEvent::LineDecoded {
             mode,

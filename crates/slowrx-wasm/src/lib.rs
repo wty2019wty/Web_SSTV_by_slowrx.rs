@@ -56,6 +56,14 @@ fn event_to_js(event: CoreEvent) -> JsValue {
             );
             set(&object, "hedrShiftHz", JsValue::from_f64(hedr_shift_hz));
         }
+        CoreEvent::MistuningResolved {
+            hedr_shift_hz,
+            from_vis,
+        } => {
+            set(&object, "type", JsValue::from_str("mistuning"));
+            set(&object, "hedrShiftHz", JsValue::from_f64(hedr_shift_hz));
+            set(&object, "fromVis", JsValue::from_bool(from_vis));
+        }
         CoreEvent::Line {
             mode,
             line_index,

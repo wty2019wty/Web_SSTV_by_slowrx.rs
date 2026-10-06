@@ -147,6 +147,20 @@ fn only_complete(events: &[SstvEvent]) -> &slowrx::SstvImage {
         .expect("ImageComplete")
 }
 
+/// The forced-mode `MistuningResolved` event as `(hedr_shift_hz, from_vis)`.
+fn mistuning(events: &[SstvEvent]) -> (f64, bool) {
+    events
+        .iter()
+        .find_map(|e| match e {
+            SstvEvent::MistuningResolved {
+                hedr_shift_hz,
+                from_vis,
+            } => Some((*hedr_shift_hz, *from_vis)),
+            _ => None,
+        })
+        .expect("MistuningResolved")
+}
+
 /// `--start` pointing at the image's first line decodes the whole image.
 #[test]
 fn manual_start_at_image_start_decodes_pd120() {
@@ -210,6 +224,10 @@ fn manual_start_absorbs_mistuned_vis_and_compensates() {
     .expect("decoder");
     let events = decoder.process(&audio);
     assert_pd120_close(only_complete(&events));
+
+    let (hz, from_vis) = mistuning(&events);
+    assert!(from_vis, "offset should come from the absorbed VIS header");
+    assert!((hz - offset_hz).abs() < 10.0, "hedr={hz}");
 }
 
 /// A header-less window uses the caller's fallback `hedr_shift_hz` to
@@ -233,6 +251,10 @@ fn manual_fallback_shift_compensates_mistuned_image() {
     .expect("decoder");
     let events = decoder.process(&audio);
     assert_pd120_close(only_complete(&events));
+
+    let (hz, from_vis) = mistuning(&events);
+    assert!(!from_vis, "no header: offset should be the caller fallback");
+    assert!((hz - offset_hz).abs() < 1.0, "hedr={hz}");
 }
 
 /// A detected header's offset must override a wrong caller fallback.
@@ -256,6 +278,10 @@ fn manual_detected_shift_overrides_fallback() {
     .expect("decoder");
     let events = decoder.process(&audio);
     assert_pd120_close(only_complete(&events));
+
+    let (hz, from_vis) = mistuning(&events);
+    assert!(from_vis, "detected header must override the fallback");
+    assert!((hz - offset_hz).abs() < 10.0, "hedr={hz}");
 }
 
 /// `--end` is the image-data end; the start is one nominal image back and the

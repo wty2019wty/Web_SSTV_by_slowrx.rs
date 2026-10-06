@@ -37,6 +37,7 @@ export interface SpectrogramInfo {
 export type DecodeEvent =
   | { type: 'vis'; mode: string; sampleOffset: number; hedrShiftHz: number }
   | { type: 'unknownVis'; code: number; sampleOffset: number; hedrShiftHz: number }
+  | { type: 'mistuning'; hedrShiftHz: number; fromVis: boolean }
   | { type: 'line'; mode: string; lineIndex: number; rgb: Uint8Array }
   | {
       type: 'image'

@@ -61,6 +61,20 @@ pub enum SstvEvent {
         /// Working-rate (11025 Hz) sample offset where the VIS stop bit ended.
         sample_offset: u64,
     },
+    /// Forced-mode only: the radio-mistuning offset (Hz) resolved for the
+    /// window, emitted once right after the one-shot VIS probe.
+    ///
+    /// `from_vis` is `true` when an absorbed VIS header supplied the offset
+    /// (automatic compensation) and `false` when the caller's fallback was
+    /// used. Surfaced for diagnostics/logging; the offset has already been
+    /// applied to the sync bins and per-pixel demod band.
+    MistuningResolved {
+        /// Adopted radio-mistuning offset in Hz (`observed_leader − 1900`).
+        hedr_shift_hz: f64,
+        /// `true` if the offset came from a VIS header, `false` if it is the
+        /// caller-supplied fallback.
+        from_vis: bool,
+    },
     /// One scan line completed (callers may render incrementally).
     ///
     /// For PD and Robot 72: `pixels` is fully composed at emission time
@@ -502,7 +516,8 @@ impl SstvDecoder {
     /// leader frequency, so the detected `hedr_shift_hz` is adopted and the
     /// pixel demod band (and sync bins) shift with the real tuning. When no
     /// header is present the offset defaults to zero; use
-    /// [`Self::with_mode_and_hedr_shift`] to supply a known fallback.
+    /// [`Self::with_mode_and_hedr_shift`] to supply a known fallback. Either
+    /// way a single [`SstvEvent::MistuningResolved`] reports the offset used.
     ///
     /// # Errors
     /// Returns [`crate::Error::InvalidSampleRate`] if the rate is 0 or
@@ -829,6 +844,15 @@ impl SstvDecoder {
                             d.has_sync.clear();
                             d.next_probe_sample = 0;
                             d.probe_sync();
+                            out.push(SstvEvent::MistuningResolved {
+                                hedr_shift_hz: detected.hedr_shift_hz,
+                                from_vis: true,
+                            });
+                        } else {
+                            out.push(SstvEvent::MistuningResolved {
+                                hedr_shift_hz: d.hedr_shift_hz,
+                                from_vis: false,
+                            });
                         }
                         let nominal_samples = (nominal_image_seconds(d.spec) * work_rate) as usize;
                         let margin_samples =
