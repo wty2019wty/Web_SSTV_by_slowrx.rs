@@ -108,6 +108,8 @@ fn event_to_js(event: CoreEvent) -> JsValue {
 #[wasm_bindgen]
 pub struct WasmDecoder {
     inner: CoreDecoder,
+    /// 整图爆发解码期间的进度回调（每帧一次）；未设置时不回调。
+    progress_cb: Option<js_sys::Function>,
 }
 
 #[wasm_bindgen]
@@ -119,7 +121,10 @@ impl WasmDecoder {
     #[wasm_bindgen(constructor)]
     pub fn new(sample_rate_hz: u32) -> Result<WasmDecoder, JsValue> {
         let inner = CoreDecoder::new(sample_rate_hz, false).map_err(|e| JsValue::from_str(&e))?;
-        Ok(WasmDecoder { inner })
+        Ok(WasmDecoder {
+            inner,
+            progress_cb: None,
+        })
     }
 
     /// 配置强制模式 + 解码窗口（选区不含 VIS 头时使用）。
@@ -176,10 +181,38 @@ impl WasmDecoder {
         self.inner.reset();
     }
 
+    /// 设置整图爆发解码的进度回调：每解完一帧调用一次
+    /// `(已解码图像音频秒, 图像体标称总秒)`。
+    ///
+    /// 回调在 `pushAudio` 同步执行期间触发，Worker 里可直接 `postMessage`
+    /// 把进度实时送到主线程（不必等本次 `pushAudio` 返回）。
+    #[wasm_bindgen(js_name = setProgressCallback)]
+    pub fn set_progress_callback(&mut self, callback: js_sys::Function) {
+        self.progress_cb = Some(callback);
+    }
+
+    /// 清除进度回调。
+    #[wasm_bindgen(js_name = clearProgressCallback)]
+    pub fn clear_progress_callback(&mut self) {
+        self.progress_cb = None;
+    }
+
     /// 推入一段单声道 f32 音频，返回本批事件数组。
     #[wasm_bindgen(js_name = pushAudio)]
     pub fn push_audio(&mut self, samples: &[f32]) -> js_sys::Array {
-        let events = self.inner.push_audio(samples);
+        let Self {
+            inner,
+            progress_cb,
+        } = self;
+        let events = inner.push_audio_with_progress(samples, &mut |done, total| {
+            if let Some(callback) = progress_cb {
+                let _ = callback.call2(
+                    &JsValue::NULL,
+                    &JsValue::from_f64(done),
+                    &JsValue::from_f64(total),
+                );
+            }
+        });
         let array = js_sys::Array::new();
         for event in events {
             array.push(&event_to_js(event));

@@ -677,16 +677,33 @@ impl SstvDecoder {
     /// Process a chunk of mono `f32` audio samples in caller's rate.
     ///
     /// Returns events produced during this call's processing window.
-    // `too_many_lines`: `process` is the decoder's state-machine loop; splitting
-    // it (e.g. extracting `DecodingState::new`) is tracked in the code-review
-    // audit (B14, epic #97).
+    pub fn process(&mut self, audio: &[f32]) -> Vec<SstvEvent> {
+        self.process_with_progress(audio, &mut |_, _| {})
+    }
+
+    /// 与 [`Self::process`] 相同，但**整图爆发解码**期间每解完一帧回调一次
+    /// `(已解码图像音频秒, 图像体标称总秒)`。
+    ///
+    /// 离线批处理把整段图像音频攒满后才一次性解完整图，这段爆发是解码过程里
+    /// 唯一的长黑盒；回调让调用方（wasm/Worker）在爆发**进行中**就能上报进度，
+    /// 而不是等 `process` 返回后才拿到结果。回调在本次 `process` 同步执行期间
+    /// 触发，wasm 侧可以直接 postMessage，主线程不会因此延迟。
+    ///
+    /// 只有批处理爆发路径（[`Self::run_findsync_and_decode`]）会回调；渐进
+    /// （实时）路径逐行产出事件，回调不会触发。
+    // `too_many_lines`: `process` 是解码器的状态机主循环；拆分（例如抽出
+    // `DecodingState::new`）记录在代码评审审计里（B14, epic #97）。
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::too_many_lines
     )]
-    pub fn process(&mut self, audio: &[f32]) -> Vec<SstvEvent> {
+    pub fn process_with_progress(
+        &mut self,
+        audio: &[f32],
+        progress: &mut dyn FnMut(f64, f64),
+    ) -> Vec<SstvEvent> {
         self.samples_processed = self.samples_processed.saturating_add(audio.len() as u64);
 
         // Manual window (issue #114): drop everything before the anchor, then
@@ -929,6 +946,7 @@ impl SstvDecoder {
                         &mut self.find_sync_scratch,
                         &mut out,
                         forced,
+                        progress,
                     );
 
                     if forced {
@@ -1051,6 +1069,7 @@ impl SstvDecoder {
         find_sync_scratch: &mut crate::sync::FindSyncScratch,
         out: &mut Vec<SstvEvent>,
         forced: bool,
+        progress: &mut dyn FnMut(f64, f64),
     ) {
         let work_rate = f64::from(crate::resample::WORKING_SAMPLE_RATE_HZ);
         let result = find_sync(&d.has_sync, work_rate, d.spec, find_sync_scratch);
@@ -1088,6 +1107,7 @@ impl SstvDecoder {
             out,
             channel_demod,
             snr_est,
+            progress,
         );
 
         // Move the now-populated image into the ImageComplete event. The
@@ -1133,8 +1153,17 @@ impl SstvDecoder {
         out: &mut Vec<SstvEvent>,
         channel_demod: &mut crate::demod::ChannelDemod,
         snr_est: &mut crate::snr::SnrEstimator,
+        progress: &mut dyn FnMut(f64, f64),
     ) {
         let line_pixels = d.spec.line_pixels as usize;
+        // 爆发解码进度：每解完一帧回报一次（已解码图像音频秒, 图像体标称总秒），
+        // 按帧数线性折算，PD 的帧是行对（两行），比值与各行布局一致。
+        let total_frames = radio_frames_per_image(d.spec).max(1);
+        let total_seconds = nominal_image_seconds(d.spec);
+        let mut report = |frame: u32| {
+            let done = (f64::from(frame) + 1.0) / f64::from(total_frames) * total_seconds;
+            progress(done.min(total_seconds), total_seconds);
+        };
         // 帧内时间偏移（秒）：逐行实测优先，缺失/空表退回 `帧号 × 行长`。
         let frame_offset = |frame: u32| -> f64 {
             frame_starts.get(frame as usize).map_or_else(
@@ -1177,6 +1206,7 @@ impl SstvDecoder {
                             pixels: d.image.pixels[start..end].to_vec(),
                         });
                     }
+                    report(pair);
                 }
             }
             crate::modespec::ChannelLayout::RobotYuv => {
@@ -1211,6 +1241,7 @@ impl SstvDecoder {
                         line_index: line,
                         pixels: d.image.pixels[start..end].to_vec(),
                     });
+                    report(line);
                 }
             }
             crate::modespec::ChannelLayout::RgbSequential => {
@@ -1239,6 +1270,7 @@ impl SstvDecoder {
                         line_index: line,
                         pixels: d.image.pixels[start..end].to_vec(),
                     });
+                    report(line);
                 }
             }
         }
@@ -1347,6 +1379,7 @@ impl SstvDecoder {
                 out,
                 channel_demod,
                 snr_est,
+                &mut |_, _| {},
             );
             d.next_frame = decodable;
         }
@@ -1394,6 +1427,7 @@ impl SstvDecoder {
             &mut out,
             &mut self.channel_demod,
             &mut self.snr_est,
+            &mut |_, _| {},
         );
         out.push(SstvEvent::ImageComplete {
             image: d.image,

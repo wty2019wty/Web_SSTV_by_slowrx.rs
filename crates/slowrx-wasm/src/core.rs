@@ -193,10 +193,24 @@ impl CoreDecoder {
     }
 
     /// 推入一段单声道 f32 音频，返回本批产生的事件。
+    ///
+    /// 不带回调的便捷入口（单元测试用）；wasm 绑定层走
+    /// [`Self::push_audio_with_progress`]。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn push_audio(&mut self, samples: &[f32]) -> Vec<CoreEvent> {
+        self.push_audio_with_progress(samples, &mut |_, _| {})
+    }
+
+    /// 与 [`Self::push_audio`] 相同，但整图爆发解码期间每解完一帧回调一次
+    /// `(已解码图像音频秒, 图像体标称总秒)`，供上层在爆发进行中上报进度。
+    pub fn push_audio_with_progress(
+        &mut self,
+        samples: &[f32],
+        progress: &mut dyn FnMut(f64, f64),
+    ) -> Vec<CoreEvent> {
         let emit_lines = self.emit_lines;
         self.decoder
-            .process(samples)
+            .process_with_progress(samples, progress)
             .into_iter()
             .filter_map(|event| convert_event(event, emit_lines))
             .collect()

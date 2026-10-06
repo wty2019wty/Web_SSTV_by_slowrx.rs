@@ -1,5 +1,6 @@
 import type {
   DecodeEvent,
+  DecodeProgress,
   ForcedAnchor,
   LiveInfo,
   LiveSummary,
@@ -12,7 +13,7 @@ import type {
 /** 解码过程中的回调。 */
 export interface DecodeHandlers {
   onEvent?: (event: DecodeEvent) => void
-  onProgress?: (fedSamples: number, totalSamples: number) => void
+  onProgress?: (progress: DecodeProgress) => void
 }
 
 /** 实时接收会话的回调。 */
@@ -84,7 +85,7 @@ export class DecoderClient {
         pending.handlers?.onEvent?.(message.event)
         break
       case 'progress':
-        pending.handlers?.onProgress?.(message.fedSamples, message.totalSamples)
+        pending.handlers?.onProgress?.(message)
         break
       case 'modes':
       case 'loaded':
