@@ -147,7 +147,7 @@ fn run_drifted(mode: SstvMode) {
     }
     let edge_mean = edge_sum as f64 / edge_n as f64;
     let inner_mean = inner_sum as f64 / inner_n as f64;
-    let all_mean = all_sum as f64 / (3 * w * h) as f64;
+    let all_mean = all_sum as f64 / f64::from(3 * w * h);
 
     // 判据：边缘列的色差不应显著高于内部。未跟踪时通道首尾像素读到同步
     // 脉冲/相邻通道，每行 +1 样本的偏差累积到 248 行≈59 像素宽的条纹，

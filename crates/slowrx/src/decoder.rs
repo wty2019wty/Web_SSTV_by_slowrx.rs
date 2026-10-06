@@ -1120,7 +1120,8 @@ impl SstvDecoder {
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
+        clippy::cast_sign_loss,
+        clippy::too_many_arguments
     )]
     fn decode_frame_range(
         d: &mut DecodingState,
@@ -1381,7 +1382,8 @@ impl SstvDecoder {
         d.image = SstvImage::new(d.spec.mode, d.spec.line_pixels, d.spec.image_lines);
         d.chroma_planes = fresh_chroma_planes(d.spec);
         let mut out = Vec::new();
-        let frame_starts = Self::compute_frame_starts(&d, result.skip_samples, result.adjusted_rate_hz);
+        let frame_starts =
+            Self::compute_frame_starts(&d, result.skip_samples, result.adjusted_rate_hz);
         Self::decode_frame_range(
             &mut d,
             result.skip_samples,

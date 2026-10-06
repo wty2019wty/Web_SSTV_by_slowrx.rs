@@ -582,6 +582,7 @@ pub(crate) fn sync_mid_offset_seconds(spec: ModeSpec) -> f64 {
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
+    clippy::too_many_arguments,
     clippy::too_many_lines
 )]
 pub(crate) fn track_line_starts(
@@ -625,8 +626,24 @@ pub(crate) fn track_line_starts(
             let rise_c = (rise_idx * SYNC_PROBE_STRIDE) as f64;
             let fall_c = (fall_idx * SYNC_PROBE_STRIDE) as f64;
             if let (Some(t_rise), Some(t_fall)) = (
-                extrapolate_edge(audio, rise_c, true, hedr_shift_hz, &win_long, &win_short),
-                extrapolate_edge(audio, fall_c, false, hedr_shift_hz, &win_long, &win_short),
+                extrapolate_edge(
+                    audio,
+                    rise_c,
+                    true,
+                    hedr_shift_hz,
+                    work_rate,
+                    &win_long,
+                    &win_short,
+                ),
+                extrapolate_edge(
+                    audio,
+                    fall_c,
+                    false,
+                    hedr_shift_hz,
+                    work_rate,
+                    &win_long,
+                    &win_short,
+                ),
             ) {
                 let dur = t_fall - t_rise;
                 if dur >= sync_lo && dur <= sync_hi {
@@ -638,6 +655,13 @@ pub(crate) fn track_line_starts(
         } else {
             i += 1;
         }
+    }
+
+    // 没有任何可用同步段（例如 VIS 之后是静音/噪声）→ 直接退回全局等差模型。
+    // 少了这一步，下面的 `best_chain` 仍会退化成 `Some((0, 1))`，随后
+    // `candidates[start]` 会越界 panic（vis-then-silence 回归）。
+    if candidates.is_empty() {
+        return fallback;
     }
 
     // 2) 候选 → 行号。**不**用 `base_skip` 的相位做严格匹配：折叠累加给出
@@ -655,14 +679,14 @@ pub(crate) fn track_line_starts(
         if (1.0..=3.0).contains(&step) && (rel - step).abs() <= MATCH_TOL_FRAMES {
             chain_len += 1;
         } else {
-            if best_chain.map_or(true, |(_, l)| chain_len > l) {
+            if best_chain.is_none_or(|(_, l)| chain_len > l) {
                 best_chain = Some((chain_start, chain_len));
             }
             chain_start = k;
             chain_len = 1;
         }
     }
-    if best_chain.map_or(true, |(_, l)| chain_len > l) {
+    if best_chain.is_none_or(|(_, l)| chain_len > l) {
         best_chain = Some((chain_start, chain_len));
     }
 
@@ -735,14 +759,13 @@ pub(crate) fn track_line_starts(
 
     // 5) 局部加权线性平滑：窗口内的线性漂移原样保留，随机抖动被压低。
     let mut out = vec![0.0; n_frames];
-    for n in 0..n_frames {
+    for (n, out_n) in out.iter_mut().enumerate() {
         let lo = n.saturating_sub(SMOOTH_HALO);
         let hi = (n + SMOOTH_HALO + 1).min(n_frames);
         let (mut sw, mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
-        for k in lo..hi {
-            let x = k as f64 - n as f64;
+        for (offset, &y) in filled[lo..hi].iter().enumerate() {
+            let x = (lo + offset) as f64 - n as f64;
             let w = 1.0 - x.abs() / (SMOOTH_HALO as f64 + 1.0);
-            let y = filled[k];
             sw += w;
             sx += w * x;
             sy += w * y;
@@ -750,7 +773,7 @@ pub(crate) fn track_line_starts(
             sxy += w * x * y;
         }
         let det = sw * sxx - sx * sx;
-        out[n] = if det.abs() > 1e-9 {
+        *out_n = if det.abs() > 1e-9 {
             // 取回归线在 x = 0（即第 n 行）处的值。
             let b = (sw * sxy - sx * sy) / det;
             (sy - b * sx) / sw
@@ -762,6 +785,7 @@ pub(crate) fn track_line_starts(
 }
 
 /// 边沿精化用的 Hann 窗（两端为 0、中间为 1）。
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn hann_window<const N: usize>() -> [f32; N] {
     let mut win = [0.0_f32; N];
     for (i, w) in win.iter_mut().enumerate() {
@@ -777,16 +801,18 @@ fn hann_window<const N: usize>() -> [f32; N] {
 /// 完成过渡），因此用长短两个窗各测一次，按窗长线性外推到"零窗长"，得到
 /// 无偏的边沿时刻。外推之后上升/下降沿中点不再带恒定偏移 —— 恒定偏移
 /// 会在整幅图一侧留下固定宽度的边缘条纹，故必须消掉。
+#[allow(clippy::cast_precision_loss)]
 fn extrapolate_edge(
     audio: &[f32],
     coarse: f64,
     rise: bool,
     hedr_shift_hz: f64,
+    rate: f64,
     win_long: &[f32],
     win_short: &[f32],
 ) -> Option<f64> {
-    let t_long = refine_edge(audio, coarse, rise, hedr_shift_hz, win_long)?;
-    let t_short = refine_edge(audio, coarse, rise, hedr_shift_hz, win_short)?;
+    let t_long = refine_edge(audio, coarse, rise, hedr_shift_hz, rate, win_long)?;
+    let t_short = refine_edge(audio, coarse, rise, hedr_shift_hz, rate, win_short)?;
     // t(W) ≈ t_true − k·W ⇒ t_true ≈ t_short + (t_short − t_long) · W_s/(W_l − W_s)
     let wl = win_long.len() as f64;
     let ws = win_short.len() as f64;
@@ -841,6 +867,7 @@ fn refine_edge(
     coarse: f64,
     rise: bool,
     hedr_shift_hz: f64,
+    rate: f64,
     win: &[f32],
 ) -> Option<f64> {
     let win_len = win.len().min(EDGE_WIN_LEN);
@@ -865,10 +892,9 @@ fn refine_edge(
         for (idx, slot) in buf.iter_mut().take(win_len).enumerate() {
             *slot = audio[s as usize + idx] * win[idx];
         }
-        let work_rate = f64::from(crate::resample::WORKING_SAMPLE_RATE_HZ);
-        let d = goertzel_power_exact(&buf[..win_len], f_sync, work_rate)
-            - goertzel_power_exact(&buf[..win_len], f_porch, work_rate)
-            - goertzel_power_exact(&buf[..win_len], f_video, work_rate);
+        let d = goertzel_power_exact(&buf[..win_len], f_sync, rate)
+            - goertzel_power_exact(&buf[..win_len], f_porch, rate)
+            - goertzel_power_exact(&buf[..win_len], f_video, rate);
         if let Some((pt, pd)) = prev {
             let crossed = if rise {
                 pd <= 0.0 && d > 0.0
@@ -884,7 +910,7 @@ fn refine_edge(
                 };
                 let t = pt + frac * (s as f64 - pt);
                 let dist = (t - expected).abs();
-                if best.map_or(true, |(bd, _)| dist < bd) {
+                if best.is_none_or(|(bd, _)| dist < bd) {
                     best = Some((dist, t));
                 }
             }
@@ -1243,8 +1269,9 @@ mod tests {
             (rise_true + 2.0, true, rise_true),
             (fall_true - 2.0, false, fall_true),
         ] {
-            let raw = refine_edge(&audio, coarse, rise, 0.0, &win_long).expect("long-window edge");
-            let ext = extrapolate_edge(&audio, coarse, rise, 0.0, &win_long, &win_short)
+            let raw =
+                refine_edge(&audio, coarse, rise, 0.0, rate, &win_long).expect("long-window edge");
+            let ext = extrapolate_edge(&audio, coarse, rise, 0.0, rate, &win_long, &win_short)
                 .expect("extrapolated edge");
             // 外推必须比单窗显著更接近真值（单窗带正比于窗长的偏移）。
             assert!(
@@ -1310,6 +1337,27 @@ mod tests {
                 ((s - offset) - t).abs() < 8.0,
                 "行 {n} 起点偏差 {:.2} 样本（等差模型会是 {n} 样本）",
                 (s - offset) - t
+            );
+        }
+    }
+
+    /// 回归守卫：`has_sync` 全 false（例如 VIS 之后是静音/噪声，音频里
+    /// 没有任何可接受的行同步段）时，`track_line_starts` 必须退回全局
+    /// 等差模型，而不是在空 `candidates` 上索引 `candidates[0]` panic。
+    #[test]
+    fn track_line_starts_empty_candidates_falls_back() {
+        let rate = f64::from(WORKING_SAMPLE_RATE_HZ);
+        let spec = modespec::for_mode(modespec::SstvMode::Pd120);
+        let has_sync = vec![false; 4096];
+        let audio = vec![0.0_f32; 8192];
+        let n_frames = 8_u32;
+        let starts = track_line_starts(&has_sync, &audio, rate, spec, 0, rate, n_frames, 0.0);
+        assert_eq!(starts.len(), n_frames as usize);
+        for (n, &s) in starts.iter().enumerate() {
+            let expected = n as f64 * spec.line_seconds * rate;
+            assert!(
+                (s - expected).abs() < 1e-6,
+                "行 {n}：退回值 {s} 应等于等差模型 {expected}"
             );
         }
     }
