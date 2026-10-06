@@ -14,6 +14,7 @@ import {
 } from './lib/liveCapture'
 import type {
   DecodeEvent,
+  DecodeProgress,
   ForcedAnchor,
   LiveInfo,
   LoadedInfo,
@@ -55,8 +56,26 @@ const results = ref<DecodedImage[]>([])
 
 const busy = ref(false)
 const status = ref('就绪')
-const progress = ref(0)
+/** 任务工作进度 0–1：扫描 + 解码的音频秒口径。进度条宽度与「已完成 %」同源。 */
+const progressRatio = ref(0)
 const elapsedMs = ref<number | null>(null)
+// 进度信息行的实时数据：已用墙钟与预计剩余。
+const progressElapsedMs = ref(0)
+const progressEtaMs = ref<number | null>(null)
+/** 当前任务是否为解码（只有解码才有时间进度可展示）。 */
+const timedJob = ref(false)
+/** 任务起始时刻（墙钟，performance.now）。 */
+let jobStartedAt = 0
+/** 进度刷新定时器：让「已用时间」平滑走动（Worker 忙时事件不会更密）。 */
+let progressTimer = 0
+/** 扫描 / 解码速率（音频秒 ÷ 墙钟秒）。解码速率要等整图爆发开始才测得到。 */
+let scanRate = 0
+let decodeRate = 0
+/** 尚未处理的扫描 / 解码音频秒数（外推预计剩余用）。 */
+let remainingScanSeconds = 0
+let remainingDecodeSeconds = 0
+/** 平滑后的预计剩余毫秒，抑制逐批进度带来的数值跳动。 */
+let smoothedEtaMs = 0
 const log = ref<string[]>([])
 
 const playing = ref(false)
@@ -264,27 +283,91 @@ function addResult(event: Extract<DecodeEvent, { type: 'image' }>) {
   })
 }
 
-function beginJob(message: string) {
+function beginJob(message: string, timed = false) {
+  window.clearInterval(progressTimer)
   busy.value = true
-  progress.value = 0
+  progressRatio.value = 0
+  progressElapsedMs.value = 0
+  progressEtaMs.value = null
+  scanRate = 0
+  decodeRate = 0
+  remainingScanSeconds = 0
+  remainingDecodeSeconds = 0
+  smoothedEtaMs = 0
+  timedJob.value = timed
+  jobStartedAt = performance.now()
+  // 只有解码任务才需要时间进度；其余任务（载入、合成）不启动定时器。
+  if (timed) progressTimer = window.setInterval(tickProgress, 100)
   elapsedMs.value = null
   status.value = message
 }
 
+/** 刷新「已用时间」，并按实测的扫描 / 解码速率外推「预计剩余」。 */
+function tickProgress() {
+  progressElapsedMs.value = performance.now() - jobStartedAt
+  // 整图爆发开始前测不到解码速率（扫描几乎不花时间），此时无法诚实估计，
+  // 宁可不显示也不编数字——上一版「预计剩余 0.0s」就是这么骗人的。
+  if (decodeRate <= 0) {
+    progressEtaMs.value = null
+    smoothedEtaMs = 0
+    return
+  }
+  const decodeMs = (remainingDecodeSeconds / decodeRate) * 1000
+  const scanMs = scanRate > 0 ? (remainingScanSeconds / scanRate) * 1000 : 0
+  const raw = decodeMs + scanMs
+  smoothedEtaMs = smoothedEtaMs > 0 ? smoothedEtaMs * 0.7 + raw * 0.3 : raw
+  progressEtaMs.value = Math.max(0, smoothedEtaMs)
+}
+
 function endJob(result: { elapsedMs: number }) {
+  window.clearInterval(progressTimer)
+  progressRatio.value = 1
   elapsedMs.value = result.elapsedMs
   status.value = `完成（${result.elapsedMs.toFixed(0)} ms，${results.value.length} 张）`
   busy.value = false
 }
 
 function failJob(error: unknown) {
+  window.clearInterval(progressTimer)
   status.value = `失败：${error instanceof Error ? error.message : String(error)}`
   busy.value = false
 }
 
-function onProgress(fed: number, total: number) {
-  progress.value = total > 0 ? Math.round((fed / total) * 100) : 0
+function onProgress(update: DecodeProgress) {
+  // 进度 =（已扫描 + 已解码）÷（待扫描 + 已知图像窗口），两段都按音频秒计。
+  // 扫描阶段推进得快是符合事实的：喂入几乎不花 CPU，真正的耗时在整图爆发里。
+  const workDone = update.scannedSeconds + update.decodedSeconds
+  const workTotal = update.scanSpanSeconds + update.decodeSpanSeconds
+  // 单调不回退：中途才发现新图（分母随之变大）时进度条保持，不倒退。
+  const ratio = workTotal > 0 ? Math.min(1, workDone / workTotal) : 0
+  progressRatio.value = Math.max(progressRatio.value, ratio)
+  remainingScanSeconds = Math.max(0, update.scanSpanSeconds - update.scannedSeconds)
+  remainingDecodeSeconds = Math.max(0, update.decodeSpanSeconds - update.decodedSeconds)
+  scanRate = update.scanMs > 0 ? update.scannedSeconds / (update.scanMs / 1000) : 0
+  decodeRate =
+    update.decodeMs > 0 && update.decodedSeconds > 0
+      ? update.decodedSeconds / (update.decodeMs / 1000)
+      : 0
+  status.value =
+    update.decodedSeconds > 0
+      ? `正在解码图像（已解码 ${update.decodedSeconds.toFixed(1)}s / ${update.decodeSpanSeconds.toFixed(1)}s）…`
+      : '正在扫描音频…'
 }
+
+/** 进度条下方的时间信息行：文档时间轴上的位置 + 完成度 + 已用 / 预计剩余。 */
+const progressMeta = computed(() => {
+  const duration = loaded.value?.duration ?? 0
+  const percent = Math.min(100, Math.floor(progressRatio.value * 100))
+  const parts = [
+    `音频 ${(progressRatio.value * duration).toFixed(1)}s / ${duration.toFixed(1)}s`,
+    `已完成 ${percent}%`,
+    `已用 ${(progressElapsedMs.value / 1000).toFixed(1)}s`,
+  ]
+  if (progressEtaMs.value !== null) {
+    parts.push(`预计剩余 ${(progressEtaMs.value / 1000).toFixed(1)}s`)
+  }
+  return parts.join(' · ')
+})
 
 // --- 实时接收（麦克风） -------------------------------------------------
 
@@ -444,7 +527,7 @@ async function redecodeRecording() {
   const clientValue = client.value
   if (!rec || !clientValue || busy.value || liveActive.value || redecodeBusy.value) return
   redecodeBusy.value = true
-  beginJob('正在载入录音并准备离线解码…')
+  beginJob('正在载入录音并准备离线解码…', true)
   try {
     const info = await clientValue.loadAudio(rec.sampleRate, rec.audio)
     applyLoaded(info)
@@ -541,7 +624,7 @@ async function decodeSelection() {
     return
   }
   results.value = []
-  beginJob(isForced.value ? '正在强制解码…' : '正在自动识模解码…')
+  beginJob(isForced.value ? '正在强制解码…' : '正在自动识模解码…', true)
   try {
     const result = await clientValue.decode(
       {
@@ -696,6 +779,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   finishPlayback()
   window.clearInterval(liveTimer)
+  window.clearInterval(progressTimer)
   navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange)
   void audioContext?.close()
   void capture.value?.stop()
@@ -948,7 +1032,10 @@ onBeforeUnmount(() => {
         自动识模会按选区范围内的 VIS 头依次解码，可能得到多张图像。
       </p>
       <p class="status">{{ status }}</p>
-      <div class="progress"><div class="bar" :style="{ width: progress + '%' }" /></div>
+      <div class="progress">
+        <div class="bar" :style="{ width: (progressRatio * 100).toFixed(2) + '%' }" />
+      </div>
+      <p v-if="busy && timedJob" class="hint">{{ progressMeta }}</p>
       <p v-if="elapsedMs !== null" class="hint">解码耗时 {{ elapsedMs.toFixed(0) }} ms</p>
     </section>
 

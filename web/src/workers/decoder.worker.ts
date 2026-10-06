@@ -89,6 +89,19 @@ const FEED_CHUNK = 32768
  *  取 2 s 而非 1 s：`ending_at` 推导出的起点可能贴近窗口边界，需要余量。 */
 const PAD_SECONDS = 2.0
 
+/** 各模式的图像体标称时长（秒）：进度条分母里「解码工作量」的来源。 */
+let modeImageSeconds: Map<string, number> | null = null
+
+/** 查模式的图像体标称时长（秒）；未知模式返回 0。 */
+function imageSecondsOf(mode: string): number {
+  if (!modeImageSeconds) {
+    modeImageSeconds = new Map(
+      (listModes() as ModeInfo[]).map((info) => [info.shortName, info.imageSeconds]),
+    )
+  }
+  return modeImageSeconds.get(mode) ?? 0
+}
+
 /** 加载 dev-synth 才存在的合成音频导出（生产构建下给出明确提示）。 */
 async function synthAudio(mode: string, withVis: boolean, count: number): Promise<Float32Array> {
   const mod = (await import('../wasm/slowrx_wasm.js')) as typeof import('../wasm/slowrx_wasm.js') & {
@@ -145,18 +158,105 @@ async function storeAndReport(
   )
 }
 
-/** 依次喂入若干音频段，回传事件与进度。 */
-function feedSegments(decoder: WasmDecoder, requestId: number, segments: Float32Array[]): void {
-  const total = segments.reduce((sum, segment) => sum + segment.length, 0)
-  let fed = 0
-  for (const segment of segments) {
-    for (let offset = 0; offset < segment.length; offset += FEED_CHUNK) {
-      const stop = Math.min(offset + FEED_CHUNK, segment.length)
-      const events = decoder.pushAudio(segment.subarray(offset, stop)) as DecodeEvent[]
-      for (const event of events) post({ type: 'event', requestId, event })
-      fed += stop - offset
-      post({ type: 'progress', requestId, fedSamples: fed, totalSamples: total })
+/** 一次解码的过程量：扫描（喂入）与解码（爆发）分别计量与计时。 */
+interface FeedState {
+  /** 已扫描的采样点数。 */
+  scannedSamples: number
+  /** 待扫描的总采样点数。 */
+  totalSamples: number
+  /** 已发现图像的窗口秒数合计（VIS / 强制模式一确定模式就登记，
+   *  保证爆发开始前进度条的分母就已包含解码工作量，不会中途回跳）。 */
+  windowSeconds: number
+  /** 已完成图像的解码秒数累计（多图）。 */
+  settledSeconds: number
+  /** 当前图像已解码秒数 / 窗口总秒数。 */
+  currentDone: number
+  currentTotal: number
+  /** 扫描阶段累计墙钟毫秒。 */
+  scanMs: number
+  /** 解码阶段累计墙钟毫秒。 */
+  decodeMs: number
+}
+
+function postProgress(
+  requestId: number,
+  state: FeedState,
+  sampleRate: number,
+  decodeMs: number,
+): void {
+  // 窗口以「已登记」为准（VIS 时就已知），爆发回调的 total 只作兜底，
+  // 避免新图刚发现、回调未到时分母偏小导致进度虚高。
+  const decodeSpanSeconds = Math.max(state.windowSeconds, state.settledSeconds + state.currentTotal)
+  const decodedSeconds = Math.min(state.settledSeconds + state.currentDone, decodeSpanSeconds)
+  post({
+    type: 'progress',
+    requestId,
+    scannedSeconds: state.scannedSamples / sampleRate,
+    scanSpanSeconds: state.totalSamples / sampleRate,
+    decodedSeconds,
+    decodeSpanSeconds,
+    scanMs: state.scanMs,
+    decodeMs,
+  })
+}
+
+/** 依次喂入若干音频段，回传事件与进度。
+ *
+ *  进度分两段计量（单位都是音频秒）：扫描 = 已喂入的音频；解码 = 整图爆发
+ *  期间按帧回调的图像音频。爆发是解码里唯一的长黑盒，因此回调在 `pushAudio`
+ *  **同步执行期间**就把进度 post 出去，主线程不必等它返回。 */
+function feedSegments(
+  decoder: WasmDecoder,
+  requestId: number,
+  segments: Float32Array[],
+  sampleRate: number,
+  initialWindowSeconds = 0,
+): void {
+  const state: FeedState = {
+    scannedSamples: 0,
+    totalSamples: segments.reduce((sum, segment) => sum + segment.length, 0),
+    windowSeconds: initialWindowSeconds,
+    settledSeconds: 0,
+    currentDone: 0,
+    currentTotal: 0,
+    scanMs: 0,
+    decodeMs: 0,
+  }
+  // 本次 pushAudio 是否触发了解码回调；触发则整段耗时计入解码，否则计入扫描。
+  let inDecode = false
+  let callStartedAt = 0
+  decoder.setProgressCallback((done: number, total: number) => {
+    inDecode = true
+    // 新图像开始（窗口总长变化或进度回跳）：把上一张图并入累计。
+    if (total !== state.currentTotal || done < state.currentDone) {
+      state.settledSeconds += state.currentDone
+      state.currentTotal = total
     }
+    state.currentDone = done
+    const decodeMs = state.decodeMs + (performance.now() - callStartedAt)
+    postProgress(requestId, state, sampleRate, decodeMs)
+  })
+  try {
+    for (const segment of segments) {
+      for (let offset = 0; offset < segment.length; offset += FEED_CHUNK) {
+        const stop = Math.min(offset + FEED_CHUNK, segment.length)
+        inDecode = false
+        callStartedAt = performance.now()
+        const events = decoder.pushAudio(segment.subarray(offset, stop)) as DecodeEvent[]
+        const costMs = performance.now() - callStartedAt
+        if (inDecode) state.decodeMs += costMs
+        else state.scanMs += costMs
+        for (const event of events) {
+          // 自动识模：VIS 一确定模式就把这张图的窗口登记进分母。
+          if (event.type === 'vis') state.windowSeconds += imageSecondsOf(event.mode)
+          post({ type: 'event', requestId, event })
+        }
+        state.scannedSamples = Math.min(state.scannedSamples + (stop - offset), state.totalSamples)
+        postProgress(requestId, state, sampleRate, state.decodeMs)
+      }
+    }
+  } finally {
+    decoder.clearProgressCallback()
   }
 }
 
@@ -200,7 +300,7 @@ function decodeSelection(
       segments = [audio.subarray(start, end), pad]
       console.log(`[worker] 自动识模：选区 ${end - start} 采样 @ ${sampleRate} Hz`)
     }
-    feedSegments(decoder, requestId, segments)
+    feedSegments(decoder, requestId, segments, sampleRate, mode ? imageSecondsOf(mode) : 0)
     post({ type: 'done', requestId, elapsedMs: performance.now() - startedAt })
     console.log(`[worker] 解码完成，耗时 ${(performance.now() - startedAt).toFixed(0)} ms`)
   } finally {

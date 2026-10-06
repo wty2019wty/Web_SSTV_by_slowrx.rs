@@ -82,6 +82,22 @@ export interface LiveSummary {
   imageCount: number
 }
 
+/** 解码进度快照（Worker 在扫描/解码期间持续回传）。 */
+export interface DecodeProgress {
+  /** 已扫描（喂入解码器）的音频秒数。 */
+  scannedSeconds: number
+  /** 待扫描的音频总秒数（含末尾补静音）。 */
+  scanSpanSeconds: number
+  /** 已解码的图像音频秒数（多图累计）。 */
+  decodedSeconds: number
+  /** 已知图像窗口的总秒数（多图累计，随新图发现而增加）。 */
+  decodeSpanSeconds: number
+  /** 扫描阶段累计墙钟毫秒（用于估算扫描速率）。 */
+  scanMs: number
+  /** 解码阶段累计墙钟毫秒（用于估算解码速率）。 */
+  decodeMs: number
+}
+
 /** 主线程 -> Worker。 */
 export type MainToWorker =
   | { type: 'listModes'; requestId: number }
@@ -109,7 +125,7 @@ export type WorkerToMain =
   | { type: 'modes'; requestId: number; modes: ModeInfo[] }
   | ({ type: 'loaded'; requestId: number } & LoadedInfo)
   | { type: 'event'; requestId: number; event: DecodeEvent }
-  | { type: 'progress'; requestId: number; fedSamples: number; totalSamples: number }
+  | ({ type: 'progress'; requestId: number } & DecodeProgress)
   | { type: 'done'; requestId: number; elapsedMs: number }
   | ({ type: 'liveStarted'; requestId: number } & LiveInfo)
   | {
