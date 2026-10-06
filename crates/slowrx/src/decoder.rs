@@ -266,6 +266,23 @@ struct DecodingState {
     next_frame: u32,
 }
 
+impl DecodingState {
+    /// Probe every newly available stride window of `self.audio` against the
+    /// sync tracker, extending `self.has_sync`. Idempotent: only samples at or
+    /// past `self.next_probe_sample` are examined.
+    ///
+    /// Factored out so the forced-mode VIS probe can re-run it after adopting
+    /// the header's mistuning (which rebuilds `self.sync_tracker`).
+    fn probe_sync(&mut self) {
+        while self.next_probe_sample + SYNC_PROBE_STRIDE * 2 <= self.audio.len() {
+            let center = self.next_probe_sample + SYNC_PROBE_STRIDE / 2;
+            let has = self.sync_tracker.has_sync_at(&self.audio, center);
+            self.has_sync.push(has);
+            self.next_probe_sample += SYNC_PROBE_STRIDE;
+        }
+    }
+}
+
 /// Headroom factor on the buffered audio length before [`find_sync`]
 /// runs. 1.00 = exactly the nominal image length. The Hough transform
 /// re-anchors the rate against whatever sync pulses are present, so
@@ -411,6 +428,11 @@ pub struct SstvDecoder {
     /// The caller-specified window for the forced mode (issue #114). Always
     /// `Some` exactly when [`Self::forced_mode`] is `Some`.
     forced_window: Option<DecodeWindow>,
+    /// Fallback radio-mistuning offset (Hz) for a forced mode when the window
+    /// carries no usable VIS header. When a VIS header *is* absorbed its own
+    /// detected `hedr_shift_hz` takes precedence; this value is only used as
+    /// the initial estimate passed to [`Self::start_decoding`].
+    forced_hedr_shift_hz: f64,
     /// `true` once the single manual-window image has been attempted, so
     /// subsequent audio is ignored.
     manual_done: bool,
@@ -442,6 +464,7 @@ impl SstvDecoder {
             working_samples_emitted: 0,
             forced_mode: None,
             forced_window: None,
+            forced_hedr_shift_hz: 0.0,
             manual_done: false,
             manual_skip_input: 0,
             manual_feed_budget: None,
@@ -473,7 +496,13 @@ impl SstvDecoder {
     /// The window's sync gate still applies: a window with no detectable sync
     /// pulses yields no image. No [`SstvEvent::VisDetected`] is emitted even
     /// when a header is absorbed (the forced mode, not the header, selects the
-    /// mode), and `hedr_shift_hz` is treated as zero.
+    /// mode).
+    ///
+    /// **Mistuning:** a VIS header beginning at the anchor is probed for its
+    /// leader frequency, so the detected `hedr_shift_hz` is adopted and the
+    /// pixel demod band (and sync bins) shift with the real tuning. When no
+    /// header is present the offset defaults to zero; use
+    /// [`Self::with_mode_and_hedr_shift`] to supply a known fallback.
     ///
     /// # Errors
     /// Returns [`crate::Error::InvalidSampleRate`] if the rate is 0 or
@@ -483,9 +512,30 @@ impl SstvDecoder {
         mode: SstvMode,
         window: DecodeWindow,
     ) -> Result<Self> {
+        Self::with_mode_and_hedr_shift(input_sample_rate_hz, mode, window, 0.0)
+    }
+
+    /// Construct a forced-mode decoder like [`Self::with_mode`], but with an
+    /// explicit `hedr_shift_hz` fallback for windows that contain no VIS
+    /// header.
+    ///
+    /// The fallback is the radio's mistuning offset (`observed 1900 Hz leader
+    /// − 1900`); it is used until/unless a VIS header at the anchor is
+    /// detected, in which case the detected offset supersedes it.
+    ///
+    /// # Errors
+    /// Returns [`crate::Error::InvalidSampleRate`] if the rate is 0 or
+    /// > [`crate::resample::MAX_INPUT_SAMPLE_RATE_HZ`].
+    pub fn with_mode_and_hedr_shift(
+        input_sample_rate_hz: u32,
+        mode: SstvMode,
+        window: DecodeWindow,
+        hedr_shift_hz: f64,
+    ) -> Result<Self> {
         let mut decoder = Self::new(input_sample_rate_hz)?;
         decoder.forced_mode = Some(mode);
         decoder.forced_window = Some(window);
+        decoder.forced_hedr_shift_hz = hedr_shift_hz;
         decoder.refresh_manual_window();
         Ok(decoder)
     }
@@ -496,6 +546,9 @@ impl SstvDecoder {
     /// Both are required: a forced mode without a window is not a supported
     /// state. Use [`Self::clear_forced_mode`] to return to automatic VIS
     /// detection.
+    ///
+    /// The fallback mistuning offset set via [`Self::set_forced_hedr_shift_hz`]
+    /// is left unchanged.
     pub fn set_forced_mode(&mut self, mode: SstvMode, window: DecodeWindow) {
         self.forced_mode = Some(mode);
         self.forced_window = Some(window);
@@ -504,6 +557,22 @@ impl SstvDecoder {
         self.state = State::AwaitingVis;
         self.vis = crate::vis::VisDetector::new(IS_KNOWN_VIS);
         self.refresh_manual_window();
+    }
+
+    /// Set the fallback radio-mistuning offset (Hz) for the forced mode.
+    ///
+    /// Used when the window contains no VIS header; a detected header's own
+    /// offset always wins. Store it before feeding audio so the decoder starts
+    /// with the right demod band. Passing zero restores the untuned default.
+    pub fn set_forced_hedr_shift_hz(&mut self, hedr_shift_hz: f64) {
+        self.forced_hedr_shift_hz = hedr_shift_hz;
+    }
+
+    /// The forced-mode fallback mistuning offset (Hz); zero unless set via
+    /// [`Self::set_forced_hedr_shift_hz`] / [`Self::with_mode_and_hedr_shift`].
+    #[must_use]
+    pub fn forced_hedr_shift_hz(&self) -> f64 {
+        self.forced_hedr_shift_hz
     }
 
     /// Clear the forced mode and window, restoring automatic VIS detection.
@@ -636,8 +705,8 @@ impl SstvDecoder {
                     // once for a VIS header to absorb; the anchor is otherwise
                     // authoritative (no search for where the image begins).
                     // Once its single image has been attempted the decoder
-                    // stops. Mistuning is unknown without a VIS, so it is
-                    // treated as zero.
+                    // stops. Mistuning starts from the caller's fallback and is
+                    // overridden by any VIS header the probe finds.
                     if let Some(mode) = self.forced_mode {
                         if self.manual_done {
                             break;
@@ -645,7 +714,7 @@ impl SstvDecoder {
                         let spec = crate::modespec::for_mode(mode);
                         self.state = Self::start_decoding(
                             spec,
-                            0.0,
+                            self.forced_hedr_shift_hz,
                             Vec::new(),
                             0,
                             ForcedPhase::ManualProbe,
@@ -726,12 +795,7 @@ impl SstvDecoder {
                     // depend on that constant, we conservatively wait
                     // until the audio extends `SYNC_PROBE_STRIDE * 2`
                     // beyond the next probe center.
-                    while d.next_probe_sample + SYNC_PROBE_STRIDE * 2 <= d.audio.len() {
-                        let center = d.next_probe_sample + SYNC_PROBE_STRIDE / 2;
-                        let has = d.sync_tracker.has_sync_at(&d.audio, center);
-                        d.has_sync.push(has);
-                        d.next_probe_sample += SYNC_PROBE_STRIDE;
-                    }
+                    d.probe_sync();
 
                     // Forced window (issue #114): probe the leading audio once
                     // for a VIS header. A real header marks the image's start
@@ -754,10 +818,17 @@ impl SstvDecoder {
                                 .min(d.has_sync.len());
                             let drain = drain_probes * SYNC_PROBE_STRIDE;
                             d.audio.drain(0..drain);
-                            d.has_sync.drain(0..drain_probes);
-                            d.next_probe_sample = d
-                                .next_probe_sample
-                                .saturating_sub(drain_probes * SYNC_PROBE_STRIDE);
+                            // The absorbed header carries the radio's
+                            // mistuning. Adopt its offset so both the sync
+                            // bins and the per-pixel demod band shift with the
+                            // real tuning, then re-probe the (small) buffered
+                            // audio against the corrected tracker — the first
+                            // probe pass ran with the caller's fallback.
+                            d.hedr_shift_hz = detected.hedr_shift_hz;
+                            d.sync_tracker = SyncTracker::new(detected.hedr_shift_hz);
+                            d.has_sync.clear();
+                            d.next_probe_sample = 0;
+                            d.probe_sync();
                         }
                         let nominal_samples = (nominal_image_seconds(d.spec) * work_rate) as usize;
                         let margin_samples =
@@ -979,7 +1050,16 @@ impl SstvDecoder {
         // Pre-reserve to avoid Vec growth reallocs. (Audit #93 D5.)
         out.reserve(d.spec.image_lines as usize + 1);
         let total_frames = radio_frames_per_image(d.spec);
-        Self::decode_frame_range(&mut d, skip, rate, 0, total_frames, out, channel_demod, snr_est);
+        Self::decode_frame_range(
+            &mut d,
+            skip,
+            rate,
+            0,
+            total_frames,
+            out,
+            channel_demod,
+            snr_est,
+        );
 
         // Move the now-populated image into the ImageComplete event. The
         // by-value `d` (audit #93 D6.2) lets `d.image` move directly

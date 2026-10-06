@@ -41,6 +41,8 @@ const synthMode = ref('pd120')
 /** 解码模式：`auto` = VIS 自动识模；其余为强制模式。 */
 const decodeMode = ref('auto')
 const forcedAnchor = ref<ForcedAnchor>('start')
+/** 强制模式的失谐兜底值（Hz）：窗口内无 VIS 头时用于补偿电台失谐。 */
+const forcedHedrShiftHz = ref(0)
 const synthWithVis = ref(true)
 /** 合成音频重复的图片数（用于验证多图自动识模）。 */
 const synthCount = ref(1)
@@ -542,6 +544,7 @@ async function decodeSelection() {
         endSample,
         mode: isForced.value ? decodeMode.value : undefined,
         anchor: isForced.value ? forcedAnchor.value : undefined,
+        hedrShiftHz: isForced.value ? forcedHedrShiftHz.value : undefined,
       },
       { onEvent: handleEvent, onProgress },
     )
@@ -913,12 +916,23 @@ onBeforeUnmount(() => {
             <option value="end">选区结束（图像数据末尾）</option>
           </select>
         </label>
+        <label v-if="isForced">
+          失谐兜底
+          <input
+            v-model.number="forcedHedrShiftHz"
+            type="number"
+            step="0.05"
+            :disabled="busy"
+          />
+          Hz
+        </label>
         <button :disabled="busy || !loaded || liveActive" @click="decodeSelection">解码选区</button>
       </div>
       <p v-if="isForced" class="hint">
         直接用播放头当锚点：在频谱图上点击/拖拽（或播放到某处暂停）把播放头放到
         {{ forcedAnchor === 'end' ? '图像数据末尾' : '图像起点' }}；解码长度由模式标称时长决定。
-        强制模式下不显示范围选区。
+        强制模式下不显示范围选区。若锚点处有 VIS 头，会自动按其测得失谐修正；
+        「失谐兜底」仅在窗口内没有 VIS 头时生效（电台偏离 1900 Hz 中频多少就填多少，可正可负）。
       </p>
       <p v-else class="hint">
         自动识模会按选区范围内的 VIS 头依次解码，可能得到多张图像。

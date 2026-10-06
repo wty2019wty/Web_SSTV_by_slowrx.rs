@@ -188,6 +188,76 @@ fn manual_start_at_transmission_start_absorbs_vis() {
     assert_pd120_close(only_complete(&events));
 }
 
+/// Forced mode must compensate radio mistuning. A `+offset` VIS header at the
+/// anchor is absorbed and its detected `hedr_shift_hz` must shift the sync bins
+/// and per-pixel demod band so the correspondingly mistuned image decodes.
+#[test]
+fn manual_start_absorbs_mistuned_vis_and_compensates() {
+    let offset_hz = 60.0;
+    let mut audio = slowrx::__test_support::vis::synth_vis_with_offset(PD120_CODE, 0.0, offset_hz);
+    audio.extend(slowrx::__test_support::mode_pd::encode_pd_shifted(
+        SstvMode::Pd120,
+        &pd120_test_image(),
+        offset_hz,
+    ));
+    pad(&mut audio);
+
+    let mut decoder = SstvDecoder::with_mode(
+        WORKING_SAMPLE_RATE_HZ,
+        SstvMode::Pd120,
+        DecodeWindow::starting_at(0.0),
+    )
+    .expect("decoder");
+    let events = decoder.process(&audio);
+    assert_pd120_close(only_complete(&events));
+}
+
+/// A header-less window uses the caller's fallback `hedr_shift_hz` to
+/// compensate the same mistuning.
+#[test]
+fn manual_fallback_shift_compensates_mistuned_image() {
+    let offset_hz = -70.0;
+    let mut audio = slowrx::__test_support::mode_pd::encode_pd_shifted(
+        SstvMode::Pd120,
+        &pd120_test_image(),
+        offset_hz,
+    );
+    pad(&mut audio);
+
+    let mut decoder = SstvDecoder::with_mode_and_hedr_shift(
+        WORKING_SAMPLE_RATE_HZ,
+        SstvMode::Pd120,
+        DecodeWindow::starting_at(0.0),
+        offset_hz,
+    )
+    .expect("decoder");
+    let events = decoder.process(&audio);
+    assert_pd120_close(only_complete(&events));
+}
+
+/// A detected header's offset must override a wrong caller fallback.
+#[test]
+fn manual_detected_shift_overrides_fallback() {
+    let offset_hz = 55.0;
+    let mut audio = slowrx::__test_support::vis::synth_vis_with_offset(PD120_CODE, 0.0, offset_hz);
+    audio.extend(slowrx::__test_support::mode_pd::encode_pd_shifted(
+        SstvMode::Pd120,
+        &pd120_test_image(),
+        offset_hz,
+    ));
+    pad(&mut audio);
+
+    let mut decoder = SstvDecoder::with_mode_and_hedr_shift(
+        WORKING_SAMPLE_RATE_HZ,
+        SstvMode::Pd120,
+        DecodeWindow::starting_at(0.0),
+        -120.0,
+    )
+    .expect("decoder");
+    let events = decoder.process(&audio);
+    assert_pd120_close(only_complete(&events));
+}
+
 /// `--end` is the image-data end; the start is one nominal image back and the
 /// image still decodes in full even with a preceding VIS header.
 #[test]

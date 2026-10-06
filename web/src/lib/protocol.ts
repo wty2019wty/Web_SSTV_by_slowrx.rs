@@ -96,6 +96,8 @@ export type MainToWorker =
       mode?: string
       /** 强制模式的锚点端点，默认 `start`。 */
       anchor?: ForcedAnchor
+      /** 强制模式的失谐兜底值（Hz）：窗口内无 VIS 头时用于补偿电台失谐。 */
+      hedrShiftHz?: number
     }
   | { type: 'liveStart'; requestId: number; sampleRate: number }
   | { type: 'livePush'; requestId: number; samples: Float32Array }

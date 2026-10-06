@@ -19,7 +19,9 @@
 //! bypassing automatic VIS header detection (issues #113/#114). A forced
 //! mode always requires a time anchor; there is no whole-stream scan mode.
 //! The decode length comes from the mode's nominal image duration and the
-//! VIS header is not counted. `--list-modes` prints the accepted names.
+//! VIS header is not counted. Radio mistuning is taken from an absorbed VIS
+//! header; for a header-less window pass `--hedr-shift <HZ>` as a fallback.
+//! `--list-modes` prints the accepted names.
 //!
 //! Requires the `cli` feature: `cargo install --features cli`.
 
@@ -87,6 +89,12 @@ struct Args {
     /// the mode's nominal image duration (the VIS header is not counted).
     #[arg(long, value_name = "SECONDS", requires = "mode")]
     end: Option<f64>,
+
+    /// Fallback radio-mistuning offset in Hz for a forced window that contains
+    /// no VIS header (a detected header's own offset always wins). Negative
+    /// values mean the radio is tuned low. Requires --mode.
+    #[arg(long, value_name = "HZ", requires = "mode", allow_hyphen_values = true)]
+    hedr_shift: Option<f64>,
 
     /// List the supported modes and exit.
     #[arg(long)]
@@ -172,8 +180,13 @@ fn run(args: &Args) -> Result<u32> {
         (None, None) => None,
     };
     let mut decoder = match (forced_mode, forced_window) {
-        (Some(mode), Some(window)) => SstvDecoder::with_mode(spec.sample_rate, mode, window)
-            .with_context(|| "construct forced-mode SstvDecoder")?,
+        (Some(mode), Some(window)) => SstvDecoder::with_mode_and_hedr_shift(
+            spec.sample_rate,
+            mode,
+            window,
+            args.hedr_shift.unwrap_or(0.0),
+        )
+        .with_context(|| "construct forced-mode SstvDecoder")?,
         (None, None) => {
             SstvDecoder::new(spec.sample_rate).with_context(|| "construct SstvDecoder")?
         }

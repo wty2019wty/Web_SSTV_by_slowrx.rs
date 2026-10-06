@@ -166,6 +166,7 @@ function decodeSelection(
   endSample: number | undefined,
   mode: string | undefined,
   anchor: ForcedAnchor,
+  hedrShiftHz: number | undefined,
 ): void {
   if (!session) throw new Error('尚未载入音频')
   const { sampleRate, audio } = session
@@ -187,10 +188,12 @@ function decodeSelection(
         mode,
         anchor === 'start' ? anchorSecs : undefined,
         anchor === 'end' ? anchorSecs : undefined,
+        hedrShiftHz || undefined,
       )
       segments = [audio, pad]
       console.log(
-        `[worker] 强制解码：模式 ${mode}，锚点 ${anchor} @ ${anchorSecs.toFixed(3)}s，喂入至文件末尾`,
+        `[worker] 强制解码：模式 ${mode}，锚点 ${anchor} @ ${anchorSecs.toFixed(3)}s，` +
+          `失谐兜底 ${hedrShiftHz ?? 0} Hz，喂入至文件末尾`,
       )
     } else {
       // 自动识模：只喂入选区，避免误识别选区外的 VIS。
@@ -302,6 +305,7 @@ ctx.onmessage = async (e: MessageEvent<MainToWorker>) => {
           message.endSample,
           message.mode,
           message.anchor ?? 'start',
+          message.hedrShiftHz,
         )
         break
       }

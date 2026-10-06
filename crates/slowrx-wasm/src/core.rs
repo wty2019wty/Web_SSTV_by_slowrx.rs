@@ -125,6 +125,9 @@ impl CoreDecoder {
     /// `start_secs` / `end_secs` 相对“喂入流的第一帧”计秒；至少提供一个。
     /// 二者都提供时以 `start_secs` 为准（与 slowrx 语义一致）。
     ///
+    /// `hedr_shift_hz` 是可选的**失谐兜底值**（Hz）：当窗口内没有 VIS 头时用它
+    /// 补偿电台失谐；若探测到 VIS 头，则以头里测出的失谐为准。
+    ///
     /// # Errors
     /// 模式名无法解析，或未提供任何锚点时返回错误字符串。
     pub fn set_forced_mode(
@@ -132,6 +135,7 @@ impl CoreDecoder {
         mode: &str,
         start_secs: Option<f64>,
         end_secs: Option<f64>,
+        hedr_shift_hz: Option<f64>,
     ) -> Result<(), String> {
         let mode =
             slowrx::parse_mode(mode).ok_or_else(|| format!("无法识别的 SSTV 模式：{mode}"))?;
@@ -140,6 +144,8 @@ impl CoreDecoder {
             (None, Some(end)) => DecodeWindow::ending_at(end),
             (None, None) => return Err("强制模式必须提供 start_secs 或 end_secs 之一".into()),
         };
+        self.decoder
+            .set_forced_hedr_shift_hz(hedr_shift_hz.unwrap_or(0.0));
         self.decoder.set_forced_mode(mode, window);
         Ok(())
     }
@@ -391,7 +397,7 @@ mod tests {
         let audio = synth_test_audio("pd120", false).expect("合成音频");
         let mut decoder = CoreDecoder::new(slowrx::WORKING_SAMPLE_RATE_HZ, false).expect("decoder");
         decoder
-            .set_forced_mode("pd120", Some(0.0), None)
+            .set_forced_mode("pd120", Some(0.0), None, None)
             .expect("配置强制模式");
         let events = feed_chunked(&mut decoder, &audio, 4096);
 
@@ -408,9 +414,9 @@ mod tests {
     #[test]
     fn forced_mode_requires_anchor() {
         let mut decoder = CoreDecoder::new(slowrx::WORKING_SAMPLE_RATE_HZ, false).expect("decoder");
-        assert!(decoder.set_forced_mode("pd120", None, None).is_err());
+        assert!(decoder.set_forced_mode("pd120", None, None, None).is_err());
         assert!(decoder
-            .set_forced_mode("no-such-mode", Some(0.0), None)
+            .set_forced_mode("no-such-mode", Some(0.0), None, None)
             .is_err());
     }
 
@@ -419,7 +425,7 @@ mod tests {
         let silence = vec![0.0_f32; slowrx::WORKING_SAMPLE_RATE_HZ as usize * 45];
         let mut decoder = CoreDecoder::new(slowrx::WORKING_SAMPLE_RATE_HZ, false).expect("decoder");
         decoder
-            .set_forced_mode("robot24", Some(0.0), None)
+            .set_forced_mode("robot24", Some(0.0), None, None)
             .expect("配置强制模式");
         let events = decoder.push_audio(&silence);
         assert!(

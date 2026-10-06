@@ -84,6 +84,8 @@ let mut decoder = SstvDecoder::with_mode(
 slowrx-cli --input recording.wav --output ./out --mode robot36 --start 12.5
 # One image whose *data* ends at 48.5 s (length from the mode's nominal 36 s).
 slowrx-cli --input recording.wav --output ./out --mode robot36 --end 48.5
+# Header-less window on a radio tuned 60 Hz low.
+slowrx-cli --input recording.wav --output ./out --mode pd120 --start 3.0 --hedr-shift -60
 slowrx-cli --list-modes
 ```
 
@@ -95,7 +97,10 @@ endpoint is needed. A VIS header beginning at a `--start` anchor is detected
 and absorbed; if it is missing the anchor itself is taken as the image start
 (the decoder does not search for where the image begins). The sync gate still
 applies (a window with no sync pulses yields no image), and decoding stops
-after that one image. See the `SstvDecoder::with_mode` docs for details.
+after that one image. Radio mistuning is compensated automatically from an
+absorbed VIS header; for a header-less window pass `--hedr-shift <HZ>` to
+supply the offset (e.g. `--hedr-shift -60` for a radio tuned 60 Hz low). See
+the `SstvDecoder::with_mode` docs for details.
 
 ## What it does
 

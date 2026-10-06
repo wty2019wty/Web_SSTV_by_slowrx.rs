@@ -117,6 +117,8 @@ impl WasmDecoder {
     /// 配置强制模式 + 解码窗口（选区不含 VIS 头时使用）。
     ///
     /// `start_secs` / `end_secs` 相对“喂入流的第一帧”计秒，至少提供一个。
+    /// `hedr_shift_hz` 为可选的失谐兜底值（Hz）：窗口内没有 VIS 头时用它补偿，
+    /// 探测到 VIS 头时以头里测出的失谐为准。
     ///
     /// # Errors
     /// 模式名无法解析或缺少锚点时抛出错误。
@@ -126,9 +128,10 @@ impl WasmDecoder {
         mode: &str,
         start_secs: Option<f64>,
         end_secs: Option<f64>,
+        hedr_shift_hz: Option<f64>,
     ) -> Result<(), JsValue> {
         self.inner
-            .set_forced_mode(mode, start_secs, end_secs)
+            .set_forced_mode(mode, start_secs, end_secs, hedr_shift_hz)
             .map_err(|e| JsValue::from_str(&e))
     }
 

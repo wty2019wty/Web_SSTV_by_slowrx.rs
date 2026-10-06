@@ -85,6 +85,7 @@ pub use crate::resample::{Resampler, MAX_INPUT_SAMPLE_RATE_HZ, WORKING_SAMPLE_RA
 pub mod __test_support {
     pub mod vis {
         pub use crate::vis::tests::synth_vis;
+        pub use crate::vis::tests::synth_vis_with_offset;
     }
     pub mod mode_pd {
         pub use crate::demod::ycbcr_to_rgb;
@@ -96,6 +97,18 @@ pub mod __test_support {
         #[must_use]
         pub fn encode_pd(mode: crate::modespec::SstvMode, ycrcb: &[[u8; 3]]) -> Vec<f32> {
             crate::pd_test_encoder::encode_pd(mode, ycrcb)
+        }
+
+        /// Like [`encode_pd`], but every tone is shifted by `freq_offset_hz`
+        /// (mistuned-radio fixture).
+        #[doc(hidden)]
+        #[must_use]
+        pub fn encode_pd_shifted(
+            mode: crate::modespec::SstvMode,
+            ycrcb: &[[u8; 3]],
+            freq_offset_hz: f64,
+        ) -> Vec<f32> {
+            crate::pd_test_encoder::encode_pd_shifted(mode, ycrcb, freq_offset_hz)
         }
     }
     pub mod mode_robot {

@@ -41,6 +41,9 @@ pub(crate) fn lum_to_freq(lum: u8) -> f64 {
 pub(crate) struct ToneWriter {
     out: Vec<f32>,
     phase: f64,
+    /// 统一叠加到每个音调（含 sync/porch）的频率偏移，单位 Hz。默认 0；
+    /// 非 0 时模拟「电台失谐」——整段传输的频率整体平移。
+    freq_offset_hz: f64,
 }
 
 impl ToneWriter {
@@ -48,6 +51,7 @@ impl ToneWriter {
         Self {
             out: Vec::new(),
             phase: 0.0,
+            freq_offset_hz: 0.0,
         }
     }
 
@@ -57,7 +61,17 @@ impl ToneWriter {
         Self {
             out: vec![0.0; n],
             phase: 0.0,
+            freq_offset_hz: 0.0,
         }
+    }
+
+    /// Set a uniform frequency offset (Hz) applied to every tone written
+    /// afterwards. Used to synthesize a *mistuned* transmission for tests:
+    /// every tone (sync, porch, and luminance) shifts by the same amount.
+    #[must_use]
+    pub fn with_freq_offset_hz(mut self, freq_offset_hz: f64) -> Self {
+        self.freq_offset_hz = freq_offset_hz;
+        self
     }
 
     /// Emit samples up to absolute output index `target_n` (exclusive) at
@@ -66,7 +80,7 @@ impl ToneWriter {
     /// never compounds.
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     pub fn fill_to(&mut self, freq_hz: f64, target_n: usize) {
-        let dphi = 2.0 * PI * freq_hz / f64::from(WORKING_SAMPLE_RATE_HZ);
+        let dphi = 2.0 * PI * (freq_hz + self.freq_offset_hz) / f64::from(WORKING_SAMPLE_RATE_HZ);
         while self.out.len() < target_n {
             self.out.push(self.phase.sin() as f32);
             self.phase += dphi;

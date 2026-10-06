@@ -23,6 +23,18 @@ use crate::test_tone::{lum_to_freq, ToneWriter, PORCH_HZ, SYNC_HZ};
 #[must_use]
 #[allow(dead_code)]
 pub(crate) fn encode_pd(mode: SstvMode, ycrcb: &[[u8; 3]]) -> Vec<f32> {
+    encode_pd_shifted(mode, ycrcb, 0.0)
+}
+
+/// Like [`encode_pd`], but every tone is shifted by `freq_offset_hz` to
+/// synthesize a mistuned radio (see `ToneWriter::with_freq_offset_hz`).
+#[must_use]
+#[allow(dead_code)]
+pub(crate) fn encode_pd_shifted(
+    mode: SstvMode,
+    ycrcb: &[[u8; 3]],
+    freq_offset_hz: f64,
+) -> Vec<f32> {
     assert!(matches!(
         mode,
         SstvMode::Pd120 | SstvMode::Pd180 | SstvMode::Pd240
@@ -34,7 +46,7 @@ pub(crate) fn encode_pd(mode: SstvMode, ycrcb: &[[u8; 3]]) -> Vec<f32> {
     assert_eq!(h % 2, 0);
 
     let sr = f64::from(WORKING_SAMPLE_RATE_HZ);
-    let mut tone = ToneWriter::new();
+    let mut tone = ToneWriter::new().with_freq_offset_hz(freq_offset_hz);
 
     // Cumulative time tracker (seconds). Targets are computed as
     // `(running_t * sr).round()` so per-event rounding doesn't drift.
