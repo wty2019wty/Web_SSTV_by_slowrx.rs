@@ -1070,6 +1070,10 @@ impl SstvDecoder {
         // line-relative skip is already relative to line 0 for both.
         let skip = result.skip_samples;
 
+        // 逐行相位跟踪：用音频里实测的行同步位置替代 `skip + n×line` 的
+        // 等差外推，消除发射端行周期偏差（几十 ppm）在 250 行上的累积。
+        let frame_starts = Self::compute_frame_starts(&d, skip, rate);
+
         // Image-complete burst: image_lines LineDecoded events + 1 ImageComplete.
         // Pre-reserve to avoid Vec growth reallocs. (Audit #93 D5.)
         out.reserve(d.spec.image_lines as usize + 1);
@@ -1078,6 +1082,7 @@ impl SstvDecoder {
             &mut d,
             skip,
             rate,
+            &frame_starts,
             0,
             total_frames,
             out,
@@ -1103,6 +1108,12 @@ impl SstvDecoder {
     /// total for a full-image burst or a smaller partial bound for progressive
     /// decoding.
     ///
+    /// `frame_starts` 是逐行相位跟踪给出的每帧起点（工作率样本，见
+    /// [`crate::sync::track_line_starts`]）。传空切片时退回 `skip + n ×
+    /// line_seconds × rate` 的全局等差模型。无论哪条路径，像素时刻都仍是
+    /// `skip + round(rate × (帧内偏移 + 通道起点 + …))` 的单次 `round()`，
+    /// 与 slowrx `video.c:140-142` 一致。
+    ///
     /// `d.audio` is passed whole to each per-line decoder (never sliced), so the
     /// last pixel's FFT window keeps its implicit rightward lookahead — see the
     /// lookahead note on [`Self::run_findsync_and_decode`].
@@ -1115,6 +1126,7 @@ impl SstvDecoder {
         d: &mut DecodingState,
         skip: i64,
         rate: f64,
+        frame_starts: &[f64],
         first_frame: u32,
         end_frame: u32,
         out: &mut Vec<SstvEvent>,
@@ -1122,18 +1134,25 @@ impl SstvDecoder {
         snr_est: &mut crate::snr::SnrEstimator,
     ) {
         let line_pixels = d.spec.line_pixels as usize;
+        // 帧内时间偏移（秒）：逐行实测优先，缺失/空表退回 `帧号 × 行长`。
+        let frame_offset = |frame: u32| -> f64 {
+            frame_starts.get(frame as usize).map_or_else(
+                || f64::from(frame) * d.spec.line_seconds,
+                |&t| (t - skip as f64) / rate,
+            )
+        };
         match d.spec.channel_layout {
             crate::modespec::ChannelLayout::PdYcbcr => {
                 let pair_count = (d.spec.image_lines / 2).min(end_frame);
                 for pair in first_frame..pair_count {
                     // slowrx `video.c:140-142` computes pixel time as
                     // `Skip + round(Rate * (y/2 * LineTime + ChanStart +
-                    // PixelTime * (x + 0.5)))`. Compute `pair_seconds = y/2 *
-                    // LineTime` here (un-rounded) and let
-                    // [`crate::mode_pd::decode_pd_line_pair`] fold it into its
-                    // own `round()`, so per-pair rounding error never
-                    // accumulates.
-                    let pair_seconds = f64::from(pair) * d.spec.line_seconds;
+                    // PixelTime * (x + 0.5)))`. `pair_seconds` 就是这里的
+                    // `y/2 * LineTime`（未取整），交给
+                    // [`crate::mode_pd::decode_pd_line_pair`] 折进它自己的
+                    // `round()`，因此逐对的取整误差不会累积；逐行跟踪时它
+                    // 换成实测起点相对 `skip` 的偏移。
+                    let pair_seconds = frame_offset(pair);
                     crate::mode_pd::decode_pd_line_pair(
                         d.spec,
                         pair,
@@ -1169,7 +1188,7 @@ impl SstvDecoder {
                 // state).
                 let line_count = d.spec.image_lines.min(end_frame);
                 for line in first_frame..line_count {
-                    let line_seconds_offset = f64::from(line) * d.spec.line_seconds;
+                    let line_seconds_offset = frame_offset(line);
                     crate::mode_robot::decode_line(
                         d.spec,
                         d.mode,
@@ -1199,7 +1218,7 @@ impl SstvDecoder {
                 // in-place per line (no deferred chroma like R36/R24).
                 let line_count = d.spec.image_lines.min(end_frame);
                 for line in first_frame..line_count {
-                    let line_seconds_offset = f64::from(line) * d.spec.line_seconds;
+                    let line_seconds_offset = frame_offset(line);
                     crate::mode_scottie::decode_line(
                         d.spec,
                         line,
@@ -1222,6 +1241,31 @@ impl SstvDecoder {
                 }
             }
         }
+    }
+
+    /// 逐行相位跟踪：用缓冲音频里实测的行同步位置给出每帧起点。
+    ///
+    /// `base_skip` / `base_rate` 来自 [`find_sync`]，只用于给检测到的同步
+    /// 脉冲分配行号；实测不足时 [`crate::sync::track_line_starts`] 内部会
+    /// 退回 `base_skip + n × line_seconds × base_rate` 的等差模型。
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn compute_frame_starts(d: &DecodingState, base_skip: i64, base_rate: f64) -> Vec<f64> {
+        let work_rate = f64::from(crate::resample::WORKING_SAMPLE_RATE_HZ);
+        crate::sync::track_line_starts(
+            &d.has_sync,
+            &d.audio,
+            work_rate,
+            d.spec,
+            base_skip,
+            base_rate,
+            radio_frames_per_image(d.spec),
+            d.hedr_shift_hz,
+        )
     }
 
     /// 渐进（实时）解码：音频已覆盖的无线电线数（含当前可能不完整的一线）。
@@ -1290,10 +1334,13 @@ impl SstvDecoder {
             .saturating_sub(PROGRESSIVE_LOOKAHEAD_FRAMES)
             .min(total_frames);
         if decodable > d.next_frame {
+            // 逐行相位跟踪：每次重估同步后按当前可用的 sync 轨道重算行起点。
+            let frame_starts = Self::compute_frame_starts(d, skip, rate);
             Self::decode_frame_range(
                 d,
                 skip,
                 rate,
+                &frame_starts,
                 d.next_frame,
                 decodable,
                 out,
@@ -1334,10 +1381,12 @@ impl SstvDecoder {
         d.image = SstvImage::new(d.spec.mode, d.spec.line_pixels, d.spec.image_lines);
         d.chroma_planes = fresh_chroma_planes(d.spec);
         let mut out = Vec::new();
+        let frame_starts = Self::compute_frame_starts(&d, result.skip_samples, result.adjusted_rate_hz);
         Self::decode_frame_range(
             &mut d,
             result.skip_samples,
             result.adjusted_rate_hz,
+            &frame_starts,
             0,
             covered,
             &mut out,

@@ -66,6 +66,10 @@ name = "roundtrip"
 required-features = ["test-support"]
 
 [[test]]
+name = "drifted_timing"
+required-features = ["test-support"]
+
+[[test]]
 name = "cli"
 required-features = ["cli"]
 
