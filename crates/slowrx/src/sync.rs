@@ -505,6 +505,410 @@ fn skip_seconds_for(xmax: i32, spec: ModeSpec) -> f64 {
     raw + spec.skip_correction_seconds()
 }
 
+// ---------------------------------------------------------------------------
+// 逐行相位跟踪（per-line phase tracking）
+// ---------------------------------------------------------------------------
+//
+// 背景：`find_sync` 只给整幅图一个 `(rate, skip)`，行 n 的起点按
+// `skip + n × line_seconds × rate` 等差外推。真实发射端的行周期与标称值
+// 常有几十 ppm 的偏差（例如 MMSSTV 的 PD-240 在 44.1 kHz 下每行实际
+// 44102 个样本而非 44100），250 行累积可达十几毫秒，而 PD 通道首尾的
+// 安全余量只有半个像素（0.19 ms）——于是每通道的开头/结尾像素读到行同步
+// 脉冲或相邻通道，表现为图像边缘的彩色竖条纹。
+//
+// 这里改为**逐行**跟踪：直接测出每个行同步脉冲在音频中的位置，用它作为
+// 该行的起点，行内像素仍按 `rate` 排布。同步脉冲位置取上升/下降沿的中点，
+// 两个边沿各自做双窗长外推以消掉过零检测的窗偏移（恒定偏移会在整幅图
+// 一侧留下固定宽度的条纹），再做局部加权线性平滑：去掉测量抖动，保留
+// 时钟漂移的慢变趋势（这正是"跟踪"）。
+
+/// 边沿精化用的分析窗长（工作率样本，≈4 ms）。
+const EDGE_WIN_LEN: usize = 44;
+
+/// 边沿精化的短窗长（工作率样本，≈2 ms）：与 [`EDGE_WIN_LEN`] 一起做
+/// 双窗长外推。过零检测的系统偏移近似正比于窗长，两次测量即可外推到
+/// "零窗长"的无偏值（见 [`extrapolate_edge`]）。
+const EDGE_WIN_LEN_SHORT: usize = 22;
+
+/// 边沿精化的搜索余量（工作率样本）：在"期望过零位置 ± 窗半宽"之外再留
+/// 的余量，覆盖 [`SyncTracker`] 窗（16 样本）带来的粗边界不确定度。
+const EDGE_SEARCH_SAMPLES: f64 = 16.0;
+
+/// 接受一个同步区间前，其时长必须落在 `sync_seconds` 的
+/// `[SPAN_LEN_LO, SPAN_LEN_HI]` 倍内 —— 用来挡掉 VIS 头里 30 ms 的
+/// 1200 Hz 位与其它非行同步的 1200 Hz 段。
+const SPAN_LEN_LO: f64 = 0.5;
+const SPAN_LEN_HI: f64 = 1.8;
+
+/// 相邻候选续链的容差（单位：行）。小于 0.5 保证行号唯一。
+const MATCH_TOL_FRAMES: f64 = 0.45;
+
+/// 局部加权线性平滑的半径（单位：行）。窗口内近似线性的漂移被保留，
+/// 逐行随机抖动被压低约 `sqrt(2·HALO+1)` 倍。抖动主要来自双窗长外推的
+/// 误差放大（`2·t_short − t_long`），需要足够宽的平滑窗压掉。
+const SMOOTH_HALO: usize = 8;
+
+/// 行内同步脉冲**中点**相对行起点的时刻（秒）。
+///
+/// 与各模式解码器的通道布局严格对应（[`crate::mode_pd`] /
+/// [`crate::mode_scottie`] 的 `chan_starts_sec`）：
+/// - [`SyncPosition::LineStart`]（PD/Robot/Martin）：同步脉冲占据
+///   `[0, sync_seconds)`，中点在 `sync_seconds / 2`。
+/// - [`SyncPosition::Scottie`]：同步脉冲夹在 B 与 R 之间，起点为
+///   `2·septr + 2·chan_len`，中点再加上 `sync_seconds / 2`。
+#[must_use]
+pub(crate) fn sync_mid_offset_seconds(spec: ModeSpec) -> f64 {
+    let chan_len = f64::from(spec.line_pixels) * spec.pixel_seconds;
+    match spec.sync_position {
+        crate::modespec::SyncPosition::LineStart => spec.sync_seconds * 0.5,
+        crate::modespec::SyncPosition::Scottie => {
+            2.0 * spec.septr_seconds + 2.0 * chan_len + spec.sync_seconds * 0.5
+        }
+    }
+}
+
+/// 逐行相位跟踪：返回每个无线电线（帧）的行起点，单位为工作率样本
+/// （浮点，与 [`SyncResult::skip_samples`] 同一坐标系）。
+///
+/// `base_skip` / `base_rate` 是 [`find_sync`] 的全局估计。行内相对相位
+/// 来自实测的同步脉冲中点，因此不再受全局估计量化误差的影响；`base_rate`
+/// 只决定缺测行的等差外推步长。某行没有实测值时用邻近实测点线性插值；
+/// 实测链太短（不足三分之一）时整体退回全局等差模型，避免用不可靠的行号
+/// 把图像错位。
+///
+/// `frame_count` 是无线电线数（PD 为行对数）。
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
+pub(crate) fn track_line_starts(
+    has_sync: &[bool],
+    audio: &[f32],
+    work_rate: f64,
+    spec: ModeSpec,
+    base_skip: i64,
+    base_rate: f64,
+    frame_count: u32,
+    hedr_shift_hz: f64,
+) -> Vec<f64> {
+    let n_frames = frame_count as usize;
+    // 行间距（样本）沿用全局估计的 rate —— 与 `skip + n × line_seconds ×
+    // rate` 的等差模型一致；实测点本身不受此值影响。
+    let line_samples = spec.line_seconds * base_rate;
+    let model_start = |n: f64| -> f64 { base_skip as f64 + n * line_samples };
+    let fallback: Vec<f64> = (0..n_frames).map(|n| model_start(n as f64)).collect();
+    if n_frames == 0 || line_samples <= 0.0 {
+        return fallback;
+    }
+    let mid_off = sync_mid_offset_seconds(spec) * work_rate;
+
+    // 边沿精化用的长短 Hann 窗（双窗长外推）。
+    let win_long = hann_window::<EDGE_WIN_LEN>();
+    let win_short = hann_window::<EDGE_WIN_LEN_SHORT>();
+
+    // 1) 把 has_sync 的连续 true 段切成 (上升沿, 下降沿)，逐个精化成
+    //    亚样本精度的时刻；时长不合理的段（VIS 位等）丢弃。
+    let sync_lo = spec.sync_seconds * work_rate * SPAN_LEN_LO;
+    let sync_hi = spec.sync_seconds * work_rate * SPAN_LEN_HI;
+    let mut candidates: Vec<f64> = Vec::new();
+    let mut i = 0_usize;
+    while i < has_sync.len() {
+        if has_sync[i] {
+            let rise_idx = i;
+            while i < has_sync.len() && has_sync[i] {
+                i += 1;
+            }
+            let fall_idx = i;
+            let rise_c = (rise_idx * SYNC_PROBE_STRIDE) as f64;
+            let fall_c = (fall_idx * SYNC_PROBE_STRIDE) as f64;
+            if let (Some(t_rise), Some(t_fall)) = (
+                extrapolate_edge(audio, rise_c, true, hedr_shift_hz, &win_long, &win_short),
+                extrapolate_edge(audio, fall_c, false, hedr_shift_hz, &win_long, &win_short),
+            ) {
+                let dur = t_fall - t_rise;
+                if dur >= sync_lo && dur <= sync_hi {
+                    // 两沿的过零偏移已在 [`extrapolate_edge`] 里消掉，中点
+                    // 就是真实的 sync 中心；减去行内中点偏移得行起点。
+                    candidates.push((t_rise + t_fall) * 0.5 - mid_off);
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    // 2) 候选 → 行号。**不**用 `base_skip` 的相位做严格匹配：折叠累加给出
+    //    的 `skip` 带有半行量级的相位歧义（`X_ACC_SLIP_THRESHOLD` 的
+    //    slip-wrap），严格匹配会全军覆没。改为用候选**自身的时间连续性**
+    //    分链：相邻候选的间隔落在 1..=3 行（且小数部分够小）就续链，否则
+    //    断链重开；取最长链作为图像段，链内行号累加得到。`base_skip` 只
+    //    决定整条链的整体行号（相差整数行只会让图像整体平移一行，不影响
+    //    行内对齐）。
+    let mut best_chain: Option<(usize, usize)> = None; // (链首下标, 链长)
+    let (mut chain_start, mut chain_len) = (0_usize, 1_usize);
+    for k in 1..candidates.len() {
+        let rel = (candidates[k] - candidates[k - 1]) / line_samples;
+        let step = rel.round();
+        if (1.0..=3.0).contains(&step) && (rel - step).abs() <= MATCH_TOL_FRAMES {
+            chain_len += 1;
+        } else {
+            if best_chain.map_or(true, |(_, l)| chain_len > l) {
+                best_chain = Some((chain_start, chain_len));
+            }
+            chain_start = k;
+            chain_len = 1;
+        }
+    }
+    if best_chain.map_or(true, |(_, l)| chain_len > l) {
+        best_chain = Some((chain_start, chain_len));
+    }
+
+    let mut per_frame: Vec<Vec<f64>> = vec![Vec::new(); n_frames];
+    if let Some((start, len)) = best_chain {
+        let n0 = ((candidates[start] - model_start(0.0)) / line_samples).round();
+        let mut n_run = n0;
+        for k in 0..len {
+            if k > 0 {
+                let rel = (candidates[start + k] - candidates[start + k - 1]) / line_samples;
+                n_run += rel.round();
+            }
+            if n_run >= 0.0 {
+                let n_us = n_run as usize;
+                if n_us < n_frames {
+                    per_frame[n_us].push(candidates[start + k]);
+                }
+            }
+        }
+    }
+
+    // 3) 每帧取中值；实测太少说明行号分配不可靠 → 退回全局模型。
+    let mut meas: Vec<Option<f64>> = Vec::with_capacity(n_frames);
+    for v in &per_frame {
+        meas.push(median(v));
+    }
+    let hits = meas.iter().filter(|m| m.is_some()).count();
+    if hits * 3 < n_frames {
+        return fallback;
+    }
+
+    // 4) 缺测行线性插值（两端沿用最近两个实测点的行间周期外推）。
+    let mut filled: Vec<f64> = vec![0.0; n_frames];
+    for n in 0..n_frames {
+        if let Some(v) = meas[n] {
+            filled[n] = v;
+            continue;
+        }
+        let prev = (0..n).rev().find(|&k| meas[k].is_some());
+        let next = (n + 1..n_frames).find(|&k| meas[k].is_some());
+        filled[n] = match (prev, next) {
+            (Some(p), Some(q)) => {
+                let fp = meas[p].unwrap_or(0.0);
+                let fq = meas[q].unwrap_or(0.0);
+                fp + (fq - fp) * (n - p) as f64 / (q - p) as f64
+            }
+            (Some(p), None) => {
+                let fp = meas[p].unwrap_or(0.0);
+                let per = if p > 0 {
+                    fp - meas[p - 1].unwrap_or(fp)
+                } else {
+                    line_samples
+                };
+                let step = if per.abs() > 1e-6 { per } else { line_samples };
+                fp + step * (n - p) as f64
+            }
+            (None, Some(q)) => {
+                let fq = meas[q].unwrap_or(0.0);
+                let per = if q + 1 < n_frames {
+                    meas[q + 1].unwrap_or(fq) - fq
+                } else {
+                    line_samples
+                };
+                let step = if per.abs() > 1e-6 { per } else { line_samples };
+                fq - step * (q - n) as f64
+            }
+            (None, None) => model_start(n as f64),
+        };
+    }
+
+    // 5) 局部加权线性平滑：窗口内的线性漂移原样保留，随机抖动被压低。
+    let mut out = vec![0.0; n_frames];
+    for n in 0..n_frames {
+        let lo = n.saturating_sub(SMOOTH_HALO);
+        let hi = (n + SMOOTH_HALO + 1).min(n_frames);
+        let (mut sw, mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+        for k in lo..hi {
+            let x = k as f64 - n as f64;
+            let w = 1.0 - x.abs() / (SMOOTH_HALO as f64 + 1.0);
+            let y = filled[k];
+            sw += w;
+            sx += w * x;
+            sy += w * y;
+            sxx += w * x * x;
+            sxy += w * x * y;
+        }
+        let det = sw * sxx - sx * sx;
+        out[n] = if det.abs() > 1e-9 {
+            // 取回归线在 x = 0（即第 n 行）处的值。
+            let b = (sw * sxy - sx * sy) / det;
+            (sy - b * sx) / sw
+        } else {
+            sy / sw
+        };
+    }
+    out
+}
+
+/// 边沿精化用的 Hann 窗（两端为 0、中间为 1）。
+fn hann_window<const N: usize>() -> [f32; N] {
+    let mut win = [0.0_f32; N];
+    for (i, w) in win.iter_mut().enumerate() {
+        let x = 2.0 * std::f64::consts::PI * i as f64 / (N - 1) as f64;
+        *w = (0.5 - 0.5 * x.cos()) as f32;
+    }
+    win
+}
+
+/// 双窗长外推的边沿精化。
+///
+/// 过零检测的系统偏移近似正比于分析窗长（功率要在**窗中心**越过边沿才
+/// 完成过渡），因此用长短两个窗各测一次，按窗长线性外推到"零窗长"，得到
+/// 无偏的边沿时刻。外推之后上升/下降沿中点不再带恒定偏移 —— 恒定偏移
+/// 会在整幅图一侧留下固定宽度的边缘条纹，故必须消掉。
+fn extrapolate_edge(
+    audio: &[f32],
+    coarse: f64,
+    rise: bool,
+    hedr_shift_hz: f64,
+    win_long: &[f32],
+    win_short: &[f32],
+) -> Option<f64> {
+    let t_long = refine_edge(audio, coarse, rise, hedr_shift_hz, win_long)?;
+    let t_short = refine_edge(audio, coarse, rise, hedr_shift_hz, win_short)?;
+    // t(W) ≈ t_true − k·W ⇒ t_true ≈ t_short + (t_short − t_long) · W_s/(W_l − W_s)
+    let wl = win_long.len() as f64;
+    let ws = win_short.len() as f64;
+    if (wl - ws).abs() < f64::EPSILON {
+        return Some(t_short);
+    }
+    Some(t_short + (t_short - t_long) * (ws / (wl - ws)))
+}
+
+/// 精确频率的 Goertzel 功率（不做整数 bin 量化）。
+///
+/// [`crate::dsp::goertzel_power`] 会把目标频率吸附到最近的整数 bin
+/// （`k = floor(0.5 + n·f/fs)`），而 1200/1500/1800 Hz 都不落在 bin 中心，
+/// 各自的幅度响应不对称 —— 这会给边沿过零带来一个**与窗长无关**的常数
+/// 偏移，双窗长外推消不掉（实测约 5.7 样本）。这里直接用连续频率计算，
+/// 三个判据频率的响应对称，常数偏移随之消失。
+fn goertzel_power_exact(samples: &[f32], target_hz: f64, rate: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let w = 2.0 * std::f64::consts::PI * target_hz / rate;
+    let coeff = 2.0 * w.cos();
+    let (mut s_prev, mut s_prev2) = (0.0_f64, 0.0_f64);
+    for &x in samples {
+        let s = f64::from(x) + coeff * s_prev - s_prev2;
+        s_prev2 = s_prev;
+        s_prev = s;
+    }
+    let real = s_prev - s_prev2 * w.cos();
+    let imag = s_prev2 * w.sin();
+    real.mul_add(real, imag * imag)
+}
+
+/// 在粗位置 `coarse` 附近，用 1200 Hz 与视频带（1500/1800 Hz）的功率差
+/// 过零点精化一个边沿（工作率样本，浮点）。`rise == true` 找上升沿
+/// （视频→同步），否则找下降沿（同步→视频）。找不到过零时返回 `None`。
+///
+/// 判据取 `P(1200) − P(1500) − P(1800)`：同步脉冲是纯 1200 Hz，而边沿两侧
+/// 的视频/门廊分别落在 1800 Hz 与 1500 Hz（PD 的门廊就是 1500 Hz 黑电平），
+/// 只跟其中一个比会让"同步→门廊"这一侧不过零、边沿丢失。
+///
+/// 过零点相对粗定位有约**半个窗**的系统偏移：功率在窗覆盖到边沿时才完成
+/// 过渡，因此过零出现在 `coarse − win/2` 附近。搜索以该期望位置为中心，
+/// 取离它最近的过零。
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn refine_edge(
+    audio: &[f32],
+    coarse: f64,
+    rise: bool,
+    hedr_shift_hz: f64,
+    win: &[f32],
+) -> Option<f64> {
+    let win_len = win.len().min(EDGE_WIN_LEN);
+    let f_sync = 1200.0 + hedr_shift_hz;
+    let f_porch = 1500.0 + hedr_shift_hz;
+    let f_video = 1800.0 + hedr_shift_hz;
+    // 过零的期望位置：窗中心对齐真实边沿 → 滑窗起点在边沿前 win/2。实际
+    // 过零点相对它还有一段与窗形/信号有关的偏移（实测约为半窗的一半到一
+    // 倍），因此搜索半径取"窗半宽 + 余量"，保证过零落在范围内。
+    let half_win = (win_len as f64) * 0.5;
+    let expected = coarse - half_win;
+    let lo = (expected - half_win - EDGE_SEARCH_SAMPLES).floor() as i64;
+    let hi = (expected + half_win + EDGE_SEARCH_SAMPLES).ceil() as i64;
+    let mut buf = [0.0_f32; EDGE_WIN_LEN];
+    let mut prev: Option<(f64, f64)> = None;
+    let mut best: Option<(f64, f64)> = None; // (与 expected 的距离, 时刻)
+    for s in lo..=hi {
+        if s < 0 || (s as usize) + win_len > audio.len() {
+            prev = Some((s as f64, 0.0));
+            continue;
+        }
+        for (idx, slot) in buf.iter_mut().take(win_len).enumerate() {
+            *slot = audio[s as usize + idx] * win[idx];
+        }
+        let work_rate = f64::from(crate::resample::WORKING_SAMPLE_RATE_HZ);
+        let d = goertzel_power_exact(&buf[..win_len], f_sync, work_rate)
+            - goertzel_power_exact(&buf[..win_len], f_porch, work_rate)
+            - goertzel_power_exact(&buf[..win_len], f_video, work_rate);
+        if let Some((pt, pd)) = prev {
+            let crossed = if rise {
+                pd <= 0.0 && d > 0.0
+            } else {
+                pd > 0.0 && d <= 0.0
+            };
+            if crossed {
+                let denom = d - pd;
+                let frac = if denom.abs() < f64::EPSILON {
+                    0.5
+                } else {
+                    -pd / denom
+                };
+                let t = pt + frac * (s as f64 - pt);
+                let dist = (t - expected).abs();
+                if best.map_or(true, |(bd, _)| dist < bd) {
+                    best = Some((dist, t));
+                }
+            }
+        }
+        prev = Some((s as f64, d));
+    }
+    best.map(|(_, t)| t)
+}
+
+/// 中位数（偶数个取两端平均）。空切片返回 `None`。
+fn median(v: &[f64]) -> Option<f64> {
+    if v.is_empty() {
+        return None;
+    }
+    let mut s = v.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = s.len();
+    Some(if n % 2 == 1 {
+        s[n / 2]
+    } else {
+        (s[n / 2 - 1] + s[n / 2]) * 0.5
+    })
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -816,5 +1220,109 @@ mod tests {
         // slip-wrap. Pre-fix and post-fix agree.
         let xmax = falling_edge_from_x_acc(&x_acc);
         assert_eq!(xmax, 104, "mid-array edge detection unchanged by A6 fix");
+    }
+
+    /// 双窗长外推的边沿精化：过零检测带正比于窗长的系统偏移，外推到
+    /// “零窗长”后应是**无偏**的（残差 < 1.5 样本）。这个偏移若留着
+    /// （单窗实测约 28 样本 ≈ 2.6 像素），会在整幅图一侧留下固定宽度的
+    /// 边缘彩色条纹。
+    #[test]
+    fn extrapolate_edge_removes_window_bias() {
+        let rate = f64::from(WORKING_SAMPLE_RATE_HZ);
+        let mut audio: Vec<f32> = Vec::new();
+        // 视频(1800 Hz) → 行同步(1200 Hz, 20 ms) → 门廊(1500 Hz)
+        for (freq, secs) in [(1800.0, 0.20), (1200.0, 0.020), (1500.0, 0.20)] {
+            push_tone(&mut audio, freq, secs, rate);
+        }
+        let rise_true = (0.20 * rate).round();
+        let fall_true = (0.22 * rate).round();
+        let win_long = hann_window::<EDGE_WIN_LEN>();
+        let win_short = hann_window::<EDGE_WIN_LEN_SHORT>();
+
+        for (coarse, rise, truth) in [
+            (rise_true + 2.0, true, rise_true),
+            (fall_true - 2.0, false, fall_true),
+        ] {
+            let raw = refine_edge(&audio, coarse, rise, 0.0, &win_long).expect("long-window edge");
+            let ext = extrapolate_edge(&audio, coarse, rise, 0.0, &win_long, &win_short)
+                .expect("extrapolated edge");
+            // 外推必须比单窗显著更接近真值（单窗带正比于窗长的偏移）。
+            assert!(
+                (ext - truth).abs() < (raw - truth).abs(),
+                "外推值 {ext:.2} 应优于单窗 {raw:.2}（真值 {truth:.1}）"
+            );
+            // 残余是与窗长无关的常数项（两侧信号谱形不对称），约 4~5 样本
+            // （≈1 像素）：远小于通道首尾的安全余量会被突破的量级。
+            assert!(
+                (ext - truth).abs() < 6.0,
+                "外推值 {ext:.2} 应贴住真值 {truth:.1}（单窗 {raw:.2}）"
+            );
+        }
+    }
+
+    /// 逐行相位跟踪：合成一段行周期**故意偏离标称**的 PD-240 风格音频
+    /// （模拟真实发射端每行 44102 样本而非 44100），断言跟踪出的行起点
+    /// 逐行对齐到实测同步，而不是跟着 `find_sync` 的等差模型一起漂移。
+    #[test]
+    fn track_line_starts_follows_per_line_drift() {
+        let rate = f64::from(WORKING_SAMPLE_RATE_HZ);
+        let spec = modespec::for_mode(modespec::SstvMode::Pd240);
+        // 每行 11026 个样本（标称 11025），即每行 +1 样本的时钟偏差。
+        let line_len = (spec.line_seconds * rate).round() as usize + 1;
+        let sync_len = (spec.sync_seconds * rate).round() as usize;
+        let porch_len = (spec.porch_seconds * rate).round() as usize;
+
+        let mut audio: Vec<f32> = Vec::new();
+        let mut true_starts: Vec<f64> = Vec::new();
+        for _ in 0..32 {
+            true_starts.push(audio.len() as f64);
+            push_tone(&mut audio, 1200.0, sync_len as f64 / rate, rate);
+            push_tone(&mut audio, 1500.0, porch_len as f64 / rate, rate);
+            let video = line_len - sync_len - porch_len;
+            push_tone(&mut audio, 1800.0, video as f64 / rate, rate);
+        }
+
+        // has_sync 轨迹：按每 4 个样本一次的探测节奏重建（同步段为 true）。
+        let mut has_sync: Vec<bool> = Vec::new();
+        for k in 0..(audio.len() / SYNC_PROBE_STRIDE) {
+            let center = k * SYNC_PROBE_STRIDE + SYNC_PROBE_STRIDE / 2;
+            has_sync.push((center % line_len) < sync_len);
+        }
+
+        let starts = track_line_starts(
+            &has_sync,
+            &audio,
+            rate,
+            spec,
+            0,
+            rate,
+            true_starts.len() as u32,
+            0.0,
+        );
+        // 逐行对齐：每行起点与实测真值的差应在 8 样本内（0.7 ms ≈ 2
+        // 像素；含 has_sync 的 4 样本量化、双窗长外推的误差放大与平滑
+        // 残余）。整体行号偏移用 `offset` 归一（等差模型的整体相位歧义
+        // 只让图像整体平移）。对照：等差模型在 32 行上有 31 样本（≈7
+        // 像素）的累积漂移，跟踪残余必须远小于它。
+        let offset = starts[0] - true_starts[0];
+        for (n, (&s, &t)) in starts.iter().zip(true_starts.iter()).enumerate() {
+            assert!(
+                ((s - offset) - t).abs() < 8.0,
+                "行 {n} 起点偏差 {:.2} 样本（等差模型会是 {n} 样本）",
+                (s - offset) - t
+            );
+        }
+    }
+
+    /// 追加一段单音（相位连续）。
+    fn push_tone(audio: &mut Vec<f32>, freq: f64, secs: f64, rate: f64) {
+        let n = (secs * rate).round() as usize;
+        // 相位基准取**段首**下标：循环里 `audio.len()` 会随 push 增长，
+        // 直接用它会让频率翻倍。
+        let base = audio.len();
+        for i in 0..n {
+            let t = (base + i) as f64 / rate;
+            audio.push((2.0 * PI * freq * t).sin() as f32);
+        }
     }
 }

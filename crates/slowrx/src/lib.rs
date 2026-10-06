@@ -53,10 +53,6 @@ pub(crate) mod snr;
 pub(crate) mod sync;
 pub mod vis;
 
-// 临时诊断模块（分析完成后删除）：需 `cargo test --features cli diag_edges`
-#[cfg(all(test, feature = "cli"))]
-mod diag_tmp;
-
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_tone;
 
