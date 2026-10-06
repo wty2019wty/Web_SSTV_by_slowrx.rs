@@ -94,3 +94,31 @@ fn decoder_no_vis_on_silence() {
          ImageComplete event(s) on 10 s of pure silence",
     );
 }
+
+/// 回归守卫：**检测到合法 VIS 之后**播放静音（整幅图像时长内探测不到任何
+/// 1200 Hz 行同步）也不得 panic。
+///
+/// 与上面两条的区别：那两条根本不会进入 `State::Decoding`；本测试先用
+/// `synth_vis` 骗过检测器进入解码状态，再喂静音，从而真正走到
+/// `sync::track_line_starts`。修复前该函数的“候选同步段”为空，
+/// `best_chain` 退化成 `Some((0, 1))`，随后 `candidates[0]` 越界 panic。
+#[cfg(feature = "test-support")]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+#[test]
+fn vis_then_silence_does_not_panic() {
+    use slowrx::WORKING_SAMPLE_RATE_HZ;
+
+    // Robot24：240 行 × 0.150 s = 36 s 标称图像时长。
+    let target = (240.0 * 0.150 * f64::from(WORKING_SAMPLE_RATE_HZ)) as usize + 8192;
+    let mut audio = slowrx::__test_support::vis::synth_vis(0x04, 0.0);
+    audio.extend(std::iter::repeat_n(0.0_f32, target));
+
+    let mut decoder = SstvDecoder::new(WORKING_SAMPLE_RATE_HZ).expect("decoder construct");
+    // 主契约：不得 panic。VIS 后无同步时旧行为是解出一张黑图（非 partial），
+    // 这里只做上界断言，不锁定具体是否产图。
+    let events = decoder.process(&audio);
+    assert!(
+        count_complete_images(&events) <= 1,
+        "VIS 后静音最多只应产出一张图",
+    );
+}
