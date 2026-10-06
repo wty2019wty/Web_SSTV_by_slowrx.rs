@@ -926,7 +926,7 @@ onBeforeUnmount(() => {
           <input
             v-model.number="forcedHedrShiftHz"
             type="number"
-            step="0.05"
+            step="0.1"
             :disabled="busy"
           />
           Hz
