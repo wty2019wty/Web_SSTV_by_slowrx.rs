@@ -16,10 +16,10 @@ use crate::modespec::SstvMode;
 use crate::resample::WORKING_SAMPLE_RATE_HZ;
 use crate::test_tone::{lum_to_freq, ToneWriter, PORCH_HZ, SYNC_HZ};
 
-/// Encode an image as PD-family audio (PD120 / PD180 / PD240). `ycrcb`
-/// is row-major `[Y, Cr, Cb]` triples of length `width * height`. Pairs
-/// of rows share averaged chroma, matching how the decoder will recover
-/// them.
+/// Encode an image as PD-family audio (PD50 / PD90 / PD120 / PD160 /
+/// PD180 / PD240 / PD290). `ycrcb` is row-major `[Y, Cr, Cb]` triples of
+/// length `width * height`. Pairs of rows share averaged chroma,
+/// matching how the decoder will recover them.
 #[must_use]
 #[allow(dead_code)]
 pub(crate) fn encode_pd(mode: SstvMode, ycrcb: &[[u8; 3]]) -> Vec<f32> {
@@ -37,7 +37,13 @@ pub(crate) fn encode_pd_shifted(
 ) -> Vec<f32> {
     assert!(matches!(
         mode,
-        SstvMode::Pd120 | SstvMode::Pd180 | SstvMode::Pd240
+        SstvMode::Pd50
+            | SstvMode::Pd90
+            | SstvMode::Pd120
+            | SstvMode::Pd160
+            | SstvMode::Pd180
+            | SstvMode::Pd240
+            | SstvMode::Pd290
     ));
     let spec = crate::modespec::for_mode(mode);
     let w = spec.line_pixels;

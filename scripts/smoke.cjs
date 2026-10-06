@@ -94,9 +94,13 @@ console.log('== 模式列表 ==')
 const modes = listModes()
 const shorts = modes.map((m) => m.shortName)
 for (const want of [
+  'pd50',
+  'pd90',
   'pd120',
+  'pd160',
   'pd180',
   'pd240',
+  'pd290',
   'robot24',
   'robot36',
   'robot72',
@@ -105,6 +109,7 @@ for (const want of [
   'scottiedx',
   'martin1',
   'martin2',
+  'sc2180',
 ]) {
   check(shorts.includes(want), `包含模式 ${want}`)
 }

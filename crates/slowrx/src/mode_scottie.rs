@@ -1,9 +1,10 @@
-//! RGB-sequential mode decoder — Scottie 1/2/DX and Martin 1/2.
+//! RGB-sequential mode decoder — Scottie 1/2/DX, Martin 1/2 and
+//! Wraase SC2-180.
 //!
-//! Both families use [`crate::modespec::ChannelLayout::RgbSequential`]:
-//! three GBR channels per radio line, written to the image in-place
-//! via `image.put_pixel`. The two families differ in **where the sync
-//! pulse sits within a radio line**:
+//! All three families use [`crate::modespec::ChannelLayout::RgbSequential`]:
+//! three RGB channels per radio line, written to the image in-place
+//! via `image.put_pixel`. They differ in **where the sync pulse sits
+//! within a radio line** and in **channel order**:
 //!
 //! - **Scottie** ([`crate::modespec::SyncPosition::Scottie`]): sync
 //!   sits between the B and R channels (mid-line). `find_sync`
@@ -11,9 +12,16 @@
 //!   at line 0's start.
 //! - **Martin** ([`crate::modespec::SyncPosition::LineStart`]): sync
 //!   at line start (standard SSTV convention); same as PD and Robot.
+//! - **Wraase SC2-180** ([`crate::modespec::SyncPosition::LineStart`]):
+//!   like Martin but without separator pulses (`septr_seconds` 0) and
+//!   with the channels sent **R→G→B** instead of G→B→R.
+//!
+//! The wire order is per-mode ([`crate::modespec::RgbOrder`]) and is
+//! applied via `spec.rgb_order.wire_rgb_indices()`, so the decoder
+//! never assumes "channel 0 is Green".
 //!
 //! ```text
-//! Scottie line layout:
+//! Scottie line layout (G→B→R):
 //!   [septr][G pixels][septr][B pixels][SYNC][porch][R pixels]
 //!     ^                                  ^
 //!     |                                  |
@@ -21,11 +29,14 @@
 //!                                        (mid-line — Scottie branch
 //!                                        in find_sync corrects skip)
 //!
-//! Martin line layout:
+//! Martin line layout (G→B→R):
 //!   [SYNC][porch][G pixels][septr][B pixels][septr][R pixels]
 //!   ^
 //!   |
 //!   line start (sync at line start; standard PD/Robot path)
+//!
+//! Wraase SC2-180 line layout (R→G→B, no septr):
+//!   [SYNC][porch][R pixels][G pixels][B pixels]
 //! ```
 //!
 //! Translated from slowrx's `video.c:72-79` (Scottie `ChanStart`) and
@@ -40,18 +51,19 @@
 //! verified at audit #94 (2026-05-15).
 
 // NOTE (audit #94 B15): the file is named `mode_scottie.rs` but its
-// `decode_line` is shared by Martin 1 / Martin 2 (both
+// `decode_line` is shared by Martin 1 / Martin 2 / Wraase SC2-180 (all
 // `ChannelLayout::RgbSequential` per ModeSpec). A rename to
 // `mode_rgb_sequential.rs` is tracked but deferred — the existing
 // name is grep-able and the per-mode behavior branches on
-// `spec.sync_position` (mid-line for Scottie, line-start for Martin)
+// `spec.sync_position` (mid-line for Scottie, line-start for the rest)
+// and `spec.rgb_order` (G→B→R for Scottie/Martin, R→G→B for Wraase)
 // rather than file boundaries.
 
 use crate::modespec::ModeSpec;
 
-/// Decode one RGB-sequential radio line (Scottie or Martin) into
-/// `image`. Per-channel start times are line-start-relative and
-/// branch on `spec.sync_position`:
+/// Decode one RGB-sequential radio line (Scottie, Martin or Wraase
+/// SC2-180) into `image`. Per-channel start times are
+/// line-start-relative and branch on `spec.sync_position`:
 ///
 /// - [`crate::modespec::SyncPosition::Scottie`] — channels are
 ///   `[septr, 2·septr+chan_len, 2·septr+2·chan_len+sync+porch]` from
@@ -92,34 +104,43 @@ pub(crate) fn decode_line(
 
     // Channel start times relative to *line start*. Scottie's mid-line
     // sync sits at `2·septr + 2·chan_len`; the LineStart branch puts
-    // sync at offset 0 (G follows after sync + porch). find_sync
+    // sync at offset 0 (channel 0 follows after sync + porch). find_sync
     // returns `skip_samples` already corrected for both — Scottie
     // applies `s = s − chan_len/2 + 2·porch` (slowrx C
     // `sync.c:123-125`), LineStart uses the unmodified PD/Robot
     // formula.
+    //
+    // Which colour each slot carries is `spec.rgb_order` (G→B→R for
+    // Scottie/Martin, R→G→B for Wraase SC2-180); Wraase additionally
+    // has `septr_seconds` 0, so its slots collapse to
+    // `[sync+porch, +chan_len, +2·chan_len]` through the same formula.
     let chan_starts_sec: [f64; 3] = match spec.sync_position {
         crate::modespec::SyncPosition::Scottie => [
-            septr_secs,                                                 // G (post-septr1)
-            2.0 * septr_secs + chan_len,                                // B (post-septr2)
-            2.0 * septr_secs + 2.0 * chan_len + sync_secs + porch_secs, // R (post-sync+porch)
+            septr_secs,                                                 // chan 0 (post-septr1)
+            2.0 * septr_secs + chan_len,                                // chan 1 (post-septr2)
+            2.0 * septr_secs + 2.0 * chan_len + sync_secs + porch_secs, // chan 2 (post-sync+porch)
         ],
-        crate::modespec::SyncPosition::LineStart => [
-            // Martin layout — slowrx C video.c default case:
+        crate::modespec::SyncPosition::LineStart => {
+            // Martin/Wraase layout — slowrx C video.c default case:
             //   ChanStart[0] = sync + porch
             //   ChanStart[1] = ChanStart[0] + chan_len + septr
             //   ChanStart[2] = ChanStart[1] + chan_len + septr
-            sync_secs + porch_secs,                                     // G
-            sync_secs + porch_secs + chan_len + septr_secs,             // B
-            sync_secs + porch_secs + 2.0 * chan_len + 2.0 * septr_secs, // R
-        ],
+            [
+                sync_secs + porch_secs,                                     // chan 0
+                sync_secs + porch_secs + chan_len + septr_secs,             // chan 1
+                sync_secs + porch_secs + 2.0 * chan_len + 2.0 * septr_secs, // chan 2
+            ]
+        }
     };
 
     let width_us = width as usize;
 
-    // Decode each channel into its own buffer.
-    let mut g = vec![0_u8; width_us];
-    let mut b = vec![0_u8; width_us];
-    let mut r = vec![0_u8; width_us];
+    // Decode each channel (in wire order) into its own buffer.
+    let mut ch = [
+        vec![0_u8; width_us],
+        vec![0_u8; width_us],
+        vec![0_u8; width_us],
+    ];
 
     let ctx = crate::demod::ChannelDecodeCtx {
         audio,
@@ -129,8 +150,7 @@ pub(crate) fn decode_line(
         spec,
     };
 
-    let buffers: [&mut [u8]; 3] = [&mut g, &mut b, &mut r];
-    for (chan_idx, buf) in buffers.into_iter().enumerate() {
+    for (chan_idx, buf) in ch.iter_mut().enumerate() {
         crate::demod::decode_one_channel_into(
             buf,
             chan_starts_sec[chan_idx],
@@ -140,9 +160,16 @@ pub(crate) fn decode_line(
         );
     }
 
-    // Compose RGB and write to the image. Scottie is already RGB; no
+    // Compose RGB and write to the image. `wire[k]` is the RGB index
+    // (0=R, 1=G, 2=B) of wire channel `k`, so `rgb[wire[k]] = ch[k]`
+    // unwinds G→B→R (Scottie/Martin) and R→G→B (Wraase) alike. No
     // chroma conversion needed (cf. Robot's YCrCb→RGB).
+    let wire = spec.rgb_order.wire_rgb_indices();
     for x in 0..width_us {
-        image.put_pixel(x as u32, line_index, [r[x], g[x], b[x]]);
+        let mut rgb = [0_u8; 3];
+        for (chan_idx, buf) in ch.iter().enumerate() {
+            rgb[wire[chan_idx]] = buf[x];
+        }
+        image.put_pixel(x as u32, line_index, rgb);
     }
 }

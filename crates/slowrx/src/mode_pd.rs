@@ -161,11 +161,10 @@ mod tests {
     /// This confirms the field is a V2 expansion that is a no-op for PD modes.
     #[test]
     fn chan_starts_sec_septr_zero_is_numerically_equivalent_to_old_formula() {
-        for spec in [
-            crate::modespec::for_mode(crate::modespec::SstvMode::Pd120),
-            crate::modespec::for_mode(crate::modespec::SstvMode::Pd180),
-            crate::modespec::for_mode(crate::modespec::SstvMode::Pd240),
-        ] {
+        for spec in crate::modespec::all_specs()
+            .iter()
+            .filter(|s| s.channel_layout == crate::modespec::ChannelLayout::PdYcbcr)
+        {
             let sync = spec.sync_seconds;
             let porch = spec.porch_seconds;
             let px = spec.pixel_seconds;

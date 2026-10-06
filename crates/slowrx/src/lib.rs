@@ -7,13 +7,15 @@
 //!
 //! ## Status
 //!
-//! PD120 / PD180 / PD240, Robot 24 / 36 / 72, Scottie 1 / 2 / DX, and
-//! Martin 1 / 2 decode from raw audio. PD120 and PD180 are validated
-//! against the ARISS Dec-2017 capture set; Robot 36 is validated
-//! against the ARISS Fram2 corpus (see
-//! `tests/ariss_fram2_validation.md`). Scottie and Martin families
-//! are synthetic round-trip-validated only — no Scottie or Martin
-//! reference WAVs are available. The public API is
+//! PD 50 / 90 / 120 / 160 / 180 / 240 / 290, Robot 24 / 36 / 72,
+//! Scottie 1 / 2 / DX, Martin 1 / 2, and Wraase SC2-180 decode from
+//! raw audio. PD120 and PD180 are validated against the ARISS
+//! Dec-2017 capture set; Robot 36 is validated against the ARISS
+//! Fram2 corpus (see `tests/ariss_fram2_validation.md`). All modes
+//! carry synthetic round-trip coverage (`tests/roundtrip.rs`) plus a
+//! per-mode timing-drift regression (`tests/drifted_timing.rs`);
+//! modes outside the three validated families are synthetic
+//! round-trip-validated only. The public API is
 //! `#[non_exhaustive]`-protected for additive growth. See
 //! <https://github.com/jasonherald/slowrx.rs/issues/9> for the
 //! roadmap.
@@ -69,8 +71,8 @@ pub use crate::decoder::{DecodeWindow, SstvDecoder, SstvEvent};
 pub use crate::error::{Error, Result};
 pub use crate::image::SstvImage;
 pub use crate::modespec::{
-    all_specs, for_mode, lookup as lookup_vis, parse_mode, ChannelLayout, ModeSpec, SstvMode,
-    SyncPosition,
+    all_specs, for_mode, lookup as lookup_vis, parse_mode, ChannelLayout, ModeSpec, RgbOrder,
+    SstvMode, SyncPosition,
 };
 pub use crate::resample::{Resampler, MAX_INPUT_SAMPLE_RATE_HZ, WORKING_SAMPLE_RATE_HZ};
 

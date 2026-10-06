@@ -1,21 +1,26 @@
 //! Synthetic RGB-sequential encoder for round-trip testing —
-//! handles both Scottie (1/2/DX) and Martin (1/2) families.
+//! handles Scottie (1/2/DX), Martin (1/2) and Wraase SC2-180.
 //!
 //! Test-only — gated behind `cfg(any(test, feature = "test-support"))`.
 //!
 //! **Per-line tone emission order branches on
-//! [`crate::modespec::SyncPosition`]:**
+//! [`crate::modespec::SyncPosition`], channel colour order on
+//! [`crate::modespec::RgbOrder`]:**
 //!
 //! ```text
-//! Scottie (sync_position::Scottie):
+//! Scottie (sync_position::Scottie, rgb_order::Gbr):
 //!   [septr 1500 Hz][G pixels 1500-2300 Hz][septr 1500 Hz]
 //!   [B pixels 1500-2300 Hz][SYNC 1200 Hz][porch 1500 Hz]
 //!   [R pixels 1500-2300 Hz]
 //!
-//! Martin (sync_position::LineStart):
+//! Martin (sync_position::LineStart, rgb_order::Gbr):
 //!   [SYNC 1200 Hz][porch 1500 Hz][G pixels 1500-2300 Hz]
 //!   [septr 1500 Hz][B pixels 1500-2300 Hz][septr 1500 Hz]
 //!   [R pixels 1500-2300 Hz]
+//!
+//! Wraase SC2-180 (sync_position::LineStart, rgb_order::Rgb, septr = 0):
+//!   [SYNC 1200 Hz][porch 1500 Hz][R pixels 1500-2300 Hz]
+//!   [G pixels 1500-2300 Hz][B pixels 1500-2300 Hz]
 //! ```
 //!
 //! Total per line = `LineTime` exactly (defensive pad fills the
@@ -32,21 +37,16 @@ use crate::modespec::SstvMode;
 use crate::resample::WORKING_SAMPLE_RATE_HZ;
 use crate::test_tone::{lum_to_freq, ToneWriter, PORCH_HZ, SEPTR_HZ, SYNC_HZ};
 
-/// Encode an RGB image as continuous-phase FM audio for either
-/// Scottie (S1/S2/DX) or Martin (M1/M2). `rgb` is row-major,
+/// Encode an RGB image as continuous-phase FM audio for Scottie
+/// (S1/S2/DX), Martin (M1/M2) or Wraase SC2-180. `rgb` is row-major,
 /// `line_pixels × image_lines` `[R, G, B]` triples (320×256 for all
-/// Scottie modes). Returns f32 PCM at [`WORKING_SAMPLE_RATE_HZ`]
+/// supported modes). Returns f32 PCM at [`WORKING_SAMPLE_RATE_HZ`]
 /// (`11_025` Hz).
 ///
-/// The per-line tone emission order branches on `spec.sync_position`:
+/// The per-line tone emission order branches on `spec.sync_position`,
+/// the channel colour order on `spec.rgb_order` (see the module doc).
 ///
-/// - [`crate::modespec::SyncPosition::Scottie`] —
-///   `[septr][G][septr][B][SYNC][porch][R]` (sync mid-line).
-/// - [`crate::modespec::SyncPosition::LineStart`] —
-///   `[SYNC][porch][G][septr][B][septr][R]` (Martin / standard
-///   PD-Robot order).
-///
-/// Panics if `mode` is not one of the five supported variants or if
+/// Panics if `mode` is not one of the six supported variants or if
 /// `rgb.len() != line_pixels * image_lines`.
 #[must_use]
 #[allow(dead_code, clippy::too_many_lines)]
@@ -58,8 +58,12 @@ pub(crate) fn encode_scottie(mode: SstvMode, rgb: &[[u8; 3]]) -> Vec<f32> {
             | SstvMode::ScottieDx
             | SstvMode::Martin1
             | SstvMode::Martin2
+            | SstvMode::WraaseSc2_180
     ));
     let spec = crate::modespec::for_mode(mode);
+    // 发送顺序的 RGB 下标（Gbr → [1,2,0] 即 G、B、R；Rgb → [0,1,2] 即
+    // R、G、B）。与解码端共用，保证编解码对称。
+    let wire = spec.rgb_order.wire_rgb_indices();
     let w = spec.line_pixels;
     let h = spec.image_lines;
     assert_eq!(rgb.len() as u32, w * h);
@@ -79,19 +83,19 @@ pub(crate) fn encode_scottie(mode: SstvMode, rgb: &[[u8; 3]]) -> Vec<f32> {
                 // Septr 1.
                 tone.fill_to(SEPTR_HZ, advance(&mut t, spec.septr_seconds));
 
-                // G channel.
+                // 通道 0（Gbr→G、Rgb→R）。
                 for x in 0..w {
-                    let g = rgb[(y * w + x) as usize][1];
-                    tone.fill_to(lum_to_freq(g), advance(&mut t, spec.pixel_seconds));
+                    let v = rgb[(y * w + x) as usize][wire[0]];
+                    tone.fill_to(lum_to_freq(v), advance(&mut t, spec.pixel_seconds));
                 }
 
                 // Septr 2.
                 tone.fill_to(SEPTR_HZ, advance(&mut t, spec.septr_seconds));
 
-                // B channel.
+                // 通道 1（Gbr→B、Rgb→G）。
                 for x in 0..w {
-                    let b = rgb[(y * w + x) as usize][2];
-                    tone.fill_to(lum_to_freq(b), advance(&mut t, spec.pixel_seconds));
+                    let v = rgb[(y * w + x) as usize][wire[1]];
+                    tone.fill_to(lum_to_freq(v), advance(&mut t, spec.pixel_seconds));
                 }
 
                 // Sync (mid-line, between B and R).
@@ -100,15 +104,16 @@ pub(crate) fn encode_scottie(mode: SstvMode, rgb: &[[u8; 3]]) -> Vec<f32> {
                 // Porch.
                 tone.fill_to(PORCH_HZ, advance(&mut t, spec.porch_seconds));
 
-                // R channel.
+                // 通道 2（Gbr→R、Rgb→B）。
                 for x in 0..w {
-                    let r = rgb[(y * w + x) as usize][0];
-                    tone.fill_to(lum_to_freq(r), advance(&mut t, spec.pixel_seconds));
+                    let v = rgb[(y * w + x) as usize][wire[2]];
+                    tone.fill_to(lum_to_freq(v), advance(&mut t, spec.pixel_seconds));
                 }
             }
             crate::modespec::SyncPosition::LineStart => {
-                // Martin layout: sync at line start, then porch, then
-                // G/septr/B/septr/R.
+                // Martin/Wraase 布局：同步脉冲在行首，其后 porch，再依次
+                // 发送通道 0/1/2；Wraase 的 septr 为 0（分隔脉冲填充
+                // 0 秒即无操作）。
 
                 // Sync.
                 tone.fill_to(SYNC_HZ, advance(&mut t, spec.sync_seconds));
@@ -116,28 +121,28 @@ pub(crate) fn encode_scottie(mode: SstvMode, rgb: &[[u8; 3]]) -> Vec<f32> {
                 // Porch.
                 tone.fill_to(PORCH_HZ, advance(&mut t, spec.porch_seconds));
 
-                // G channel.
+                // 通道 0（Gbr→G、Rgb→R）。
                 for x in 0..w {
-                    let g = rgb[(y * w + x) as usize][1];
-                    tone.fill_to(lum_to_freq(g), advance(&mut t, spec.pixel_seconds));
+                    let v = rgb[(y * w + x) as usize][wire[0]];
+                    tone.fill_to(lum_to_freq(v), advance(&mut t, spec.pixel_seconds));
                 }
 
                 // Septr 1.
                 tone.fill_to(SEPTR_HZ, advance(&mut t, spec.septr_seconds));
 
-                // B channel.
+                // 通道 1（Gbr→B、Rgb→G）。
                 for x in 0..w {
-                    let b = rgb[(y * w + x) as usize][2];
-                    tone.fill_to(lum_to_freq(b), advance(&mut t, spec.pixel_seconds));
+                    let v = rgb[(y * w + x) as usize][wire[1]];
+                    tone.fill_to(lum_to_freq(v), advance(&mut t, spec.pixel_seconds));
                 }
 
                 // Septr 2.
                 tone.fill_to(SEPTR_HZ, advance(&mut t, spec.septr_seconds));
 
-                // R channel.
+                // 通道 2（Gbr→R、Rgb→B）。
                 for x in 0..w {
-                    let r = rgb[(y * w + x) as usize][0];
-                    tone.fill_to(lum_to_freq(r), advance(&mut t, spec.pixel_seconds));
+                    let v = rgb[(y * w + x) as usize][wire[2]];
+                    tone.fill_to(lum_to_freq(v), advance(&mut t, spec.pixel_seconds));
                 }
             }
         }
