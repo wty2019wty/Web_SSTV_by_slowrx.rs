@@ -91,8 +91,9 @@ pub struct ModeSpec {
     /// Per-pixel duration within a colour channel, seconds.
     pub pixel_seconds: f64,
     /// Channel separator pulse duration, seconds. Translated from slowrx's
-    /// `SeptrTime` field (`modespec.c`). Zero for all PD-family modes; non-zero
-    /// for Robot, Martin, and Scottie modes (V2). Stored here so the
+    /// `SeptrTime` field (`modespec.c`). Zero for all PD-family modes and
+    /// Wraase SC2-180 (its scans run back-to-back); non-zero for Robot,
+    /// Martin, and Scottie modes (V2). Stored here so the
     /// `chan_starts_sec` formula in `mode_pd::decode_pd_line_pair` matches
     /// slowrx's `video.c:88-92` term-for-term and won't silently break when
     /// non-PD modes are added.
@@ -142,8 +143,9 @@ pub enum ChannelLayout {
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SyncPosition {
-    /// Sync pulse at the start of each radio line. PD, Robot, Martin.
-    /// Scottie family uses [`SyncPosition::Scottie`] instead.
+    /// Sync pulse at the start of each radio line. PD, Robot, Martin,
+    /// Wraase SC2-180. Scottie family uses [`SyncPosition::Scottie`]
+    /// instead.
     LineStart,
     /// Sync pulse between B and R within each radio line. Scottie family.
     Scottie,

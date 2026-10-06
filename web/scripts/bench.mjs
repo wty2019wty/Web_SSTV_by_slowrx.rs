@@ -1,9 +1,10 @@
 // 浏览器 V8 解码性能基准：启动 Vite，用本机 Edge/Chrome 在 Worker 内
-// 解码各模式的合成音频，统计耗时。
+// 解码全部模式的合成音频，统计耗时。模式清单与标称图像时长直接取自
+// wasm 的 listModes()（与 Rust 模式表同源），不手抄。
 //
 // 前置：.\\build-wasm.ps1 -Dev
 // 运行：cd web && npm run bench
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
@@ -24,16 +25,24 @@ if (!executablePath) {
   process.exit(1)
 }
 
-// 合成模式的显示名（用于选择下拉项）。
-const MODES = [
-  ['PD-120', 124.0],
-  ['PD-180', 180.0],
-  ['PD-240', 240.0],
-  ['Robot 36', 36.0],
-  ['Robot 72', 72.0],
-  ['Scottie 1', 110.0],
-  ['Martin 1', 114.0],
-]
+// 全部模式（与 wasm 的 listModes() 同源，含标称图像时长）。
+// 生成物（build-wasm.ps1 的输出）未就绪时给出友好提示，
+// 而不是在 import 期抛出原始的模块找不到错误。
+const wasmJs = path.resolve(here, '../src/wasm/slowrx_wasm.js')
+const wasmBin = path.resolve(here, '../src/wasm/slowrx_wasm_bg.wasm')
+if (!existsSync(wasmJs) || !existsSync(wasmBin)) {
+  console.error('未找到 web/src/wasm/ 生成物，请先执行：.\\build-wasm.ps1 -Dev')
+  process.exit(1)
+}
+const { default: init, listModes } = await import('../src/wasm/slowrx_wasm.js')
+await init({
+  module_or_path: readFileSync(wasmBin),
+})
+const MODES = listModes().map((m) => ({
+  label: m.name,
+  dims: `${m.width}×${m.height}`,
+  imageSeconds: m.imageSeconds,
+}))
 
 async function clickButtonByText(page, text) {
   const ok = await page.evaluate((label) => {
@@ -126,14 +135,27 @@ try {
   await decodeOnce(page)
   console.log('预热完成，开始测量…\n')
 
-  console.log('模式'.padEnd(12), '图像(s)'.padStart(8), '解码(ms)'.padStart(10), '倍数'.padStart(8))
+  console.log(
+    '模式'.padEnd(16),
+    '分辨率'.padEnd(10),
+    '图像(s)'.padStart(8),
+    '解码(ms)'.padStart(10),
+    '倍速(×)'.padStart(8),
+  )
   const rows = []
-  for (const [label, imageSeconds] of MODES) {
+  for (const { label, dims, imageSeconds } of MODES) {
     await loadMode(page, label)
     const ms = await decodeOnce(page)
-    const ratio = imageSeconds > 0 ? (ms / 1000 / imageSeconds).toFixed(2) : '—'
-    rows.push([label, imageSeconds, ms, ratio])
-    console.log(label.padEnd(12), String(imageSeconds).padStart(8), String(ms).padStart(10), String(ratio).padStart(8))
+    // 倍速 = 图像时长 ÷ 解码耗时（与 README 基准表口径一致）。
+    const ratio = ms > 0 && imageSeconds > 0 ? (imageSeconds / (ms / 1000)).toFixed(2) : '—'
+    rows.push([label, dims, imageSeconds, ms, ratio])
+    console.log(
+      label.padEnd(16),
+      dims.padEnd(10),
+      imageSeconds.toFixed(1).padStart(8),
+      String(ms).padStart(10),
+      String(ratio).padStart(8),
+    )
   }
 
   console.log('\n说明：解码耗时由 Worker 内计时（仅解码循环，不含频谱图/传输）。')
