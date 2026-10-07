@@ -51,11 +51,22 @@ const NUM_PHASES: usize = 256;
 pub struct Resampler {
     input_rate: u32,
     /// `input_rate / WORKING_SAMPLE_RATE_HZ`, expressed as a stride.
+    /// 仅用于 `process` 的输出容量预估；样本位置由 [`Self::out_index`]
+    /// 精确推导，不走浮点累加。
     stride: f64,
-    /// Position into the input buffer (fractional, accumulates across calls).
-    phase: f64,
+    /// 已产出的工作率样本数。第 `out_index` 个输出对应的**输入**位置是
+    /// `out_index × input_rate / WORKING_SAMPLE_RATE_HZ`（精确有理数）。
+    ///
+    /// 位置由这个全局序号推导，而不是在 `process` 里对 `phase` 浮点累加：
+    /// 累加与「按块回退基准」的组合会让舍入路径随输入分块方式变化，
+    /// 同一段音频整段喂入与分块喂入会得到不同的输出（相位量化档翻转，
+    /// 实测差异达 1e-3 量级），进而让实时小块解码与离线大块解码的
+    /// `has_sync` 轨道不同、图像不一致。
+    out_index: u64,
     /// Carry-over input samples from the previous call.
     tail: Vec<f32>,
+    /// `tail[0]` 对应的全局输入下标（与 [`Self::out_index`] 同一坐标系）。
+    tail_start: u64,
     /// 256-phase polyphase tap bank, indexed by `frac` quantized to
     /// 1/256 sub-sample. Built once in [`Resampler::new`] (~64 KB, static
     /// for the resampler's lifetime). Each row is a Hann-windowed sinc at
@@ -141,74 +152,78 @@ impl Resampler {
         Ok(Self {
             input_rate,
             stride: f64::from(input_rate) / f64::from(WORKING_SAMPLE_RATE_HZ),
-            phase: 0.0,
+            out_index: 0,
             tail: Vec::new(),
+            tail_start: 0,
             taps,
         })
     }
 
     /// Resample a chunk of input audio into working-rate output.
+    ///
+    /// 输出与输入分块方式**严格无关**：第 `k` 个输出的输入位置由
+    /// `k × input_rate / WORKING_SAMPLE_RATE_HZ` 精确推导（见
+    /// [`Self::out_index`]），整段喂入与任意分块喂入得到逐位相同的输出。
     #[must_use = "the resampled audio Vec must be consumed; dropping it discards the decoder input"]
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_possible_wrap,
-        clippy::needless_range_loop
+        clippy::cast_sign_loss
     )]
     pub fn process(&mut self, input: &[f32]) -> Vec<f32> {
         // Concatenate carry-over with the new chunk.
+        let origin = self.tail_start;
         let mut buf = std::mem::take(&mut self.tail);
         buf.extend_from_slice(input);
+        let end = origin + buf.len() as u64;
 
         // Output length is approximately buf.len() / stride ± 1 (phase
         // carry-over). Pre-sizing saves a reallocation per process()
         // call on every audio chunk. (Audit #92 D9.)
         let expected_out = (buf.len() as f64 / self.stride).ceil() as usize;
         let mut out = Vec::with_capacity(expected_out);
+        let work = u64::from(WORKING_SAMPLE_RATE_HZ);
         loop {
-            // D2b off-by-one fix (#87): the kernel reads indices
-            // `floor(phase)..floor(phase) + FIR_TAPS`, so it needs
-            // `floor(phase) + FIR_TAPS` samples in `buf`. Pre-#87 this
-            // was `(phase + FIR_TAPS).ceil()`, which over-reserved by one
-            // sample for fractional `phase`.
-            let needed_end = (self.phase.floor() as usize) + FIR_TAPS;
-            if needed_end > buf.len() {
+            // 第 out_index 个输出的输入位置 = out_index × input_rate / work，
+            // 拆成精确的整数部分与有理小数部分（分母 work）。
+            let pos_num = self.out_index * u64::from(self.input_rate);
+            let whole = pos_num / work;
+            // D2b off-by-one fix (#87): the kernel reads
+            // `[whole, whole + FIR_TAPS)`，因此需要 `whole + FIR_TAPS`
+            // 个全局样本已到齐。
+            if whole + FIR_TAPS as u64 > end {
                 break;
             }
-            let frac = self.phase.fract();
+            let frac = (pos_num % work) as f64 / work as f64;
             let phase_idx = ((frac * NUM_PHASES as f64).round() as usize).min(NUM_PHASES - 1);
             let taps = &self.taps[phase_idx];
-            let start = self.phase.floor() as isize;
 
             // Convolve using the precomputed taps at this quantized phase.
-            // No transcendentals in the hot path.
+            // No transcendentals in the hot path. `whole ≥ origin` 恒成立
+            // （`tail_start` 就是上一轮记录的下一核起点），且核完全落在
+            // `buf` 内（循环条件保证）。
+            let start = (whole - origin) as usize;
+            debug_assert!(start + FIR_TAPS <= buf.len());
             let mut acc: f32 = 0.0;
-            for k in 0..FIR_TAPS {
-                let idx = start + k as isize;
-                if (0..buf.len() as isize).contains(&idx) {
-                    acc += taps[k] * buf[idx as usize];
-                }
+            for (k, &tap) in taps.iter().enumerate() {
+                acc += tap * buf[start + k];
             }
             out.push(acc);
-            self.phase += self.stride;
+            self.out_index += 1;
         }
 
-        // Keep the trailing samples that the next call will need.
-        let drop = self.phase.floor() as usize;
-        if drop < buf.len() {
-            self.tail = buf[drop..].to_vec();
-            self.phase -= drop as f64;
+        // Keep the trailing samples that the next call will need: from the
+        // next output kernel's start index onward.
+        let next_whole = (self.out_index * u64::from(self.input_rate)) / work;
+        let drop = next_whole.saturating_sub(origin);
+        if drop < buf.len() as u64 {
+            self.tail = buf[drop as usize..].to_vec();
+            self.tail_start = next_whole;
         } else {
-            // Reached only when `buf.len() == 0` (empty input on a fresh
-            // resampler, or after a prior call drained the tail) —
-            // `phase` stays ∈ [0, 1) post-loop, so `drop = floor(phase) = 0`
-            // and `drop < buf.len()` is `0 < 0 = false`. For any non-empty
-            // `buf` under `MAX_INPUT_SAMPLE_RATE_HZ`, this branch is
-            // unreachable. Exercised by the `empty_input_returns_empty`
-            // test.
+            // 只有 `buf` 为空（全新状态或已排空）才会走到这里；`out_index`
+            // 与已产出样本不受影响。由 `empty_input_returns_empty` 覆盖。
             self.tail.clear();
-            self.phase -= buf.len() as f64;
+            self.tail_start = end;
         }
         out
     }
@@ -219,12 +234,14 @@ impl Resampler {
         self.input_rate
     }
 
-    /// Clear FIR tail buffer + phase accumulator so a subsequent call to
-    /// `process` starts with a clean state. Keeps the input rate, cutoff,
-    /// and stride — the rate doesn't change across `reset_state` calls.
+    /// Clear FIR tail buffer + position counter so a subsequent call to
+    /// `process` starts with a clean state (new audio is treated as
+    /// starting at input position 0). Keeps the input rate, cutoff, and
+    /// stride — the rate doesn't change across `reset_state` calls.
     pub(crate) fn reset_state(&mut self) {
         self.tail.clear();
-        self.phase = 0.0;
+        self.out_index = 0;
+        self.tail_start = 0;
     }
 }
 
@@ -356,14 +373,16 @@ mod tests {
         let mid = in_audio.len() / 2;
         let mut split = r2.process(&in_audio[..mid]);
         split.extend_from_slice(&r2.process(&in_audio[mid..]));
-        // Length should match within ±2 samples; per-sample diff should be
-        // tiny (filter edge effects).
-        assert!((single.len() as isize - split.len() as isize).abs() <= 2);
-        let common = single.len().min(split.len());
-        let max_diff = (0..common)
-            .map(|i| (single[i] - split[i]).abs())
-            .fold(0.0_f32, f32::max);
-        assert!(max_diff < 0.01, "max_diff={max_diff}");
+        // 分块不变性（严格）：长度与每个样本都必须逐位一致。
+        assert_eq!(single.len(), split.len(), "输出长度应严格一致");
+        let first_diff = single
+            .iter()
+            .zip(split.iter())
+            .position(|(x, y)| x.to_bits() != y.to_bits());
+        assert!(
+            first_diff.is_none(),
+            "分块喂入应逐位一致，首个差异在 {first_diff:?}"
+        );
     }
 
     /// Unit-gain regression guard (#87). The audit (D1) claimed the 64
@@ -482,6 +501,41 @@ mod tests {
         );
     }
 
+    /// 分块不变性：同一段音频整段喂入与按任意大小分块喂入，输出必须
+    /// **逐位相同**（实时 4096 块 vs 离线 32768 块 vs 整段喂入）。
+    ///
+    /// 回归背景：`process` 曾用浮点累加 `phase` 并按块回退基准，舍入路径随
+    /// 分块方式变化，11050 Hz 下实测差异达 1.9e-3（一个相位量化档）——
+    /// 同一段 PCM 实时解码与离线解码因此得到不同的 `has_sync` 轨道与图像。
+    #[test]
+    fn chunking_is_bit_exact_across_chunk_sizes() {
+        for rate in [11_050_u32, 44_100, 48_000] {
+            let audio = synth_tone_at(rate, 1500.0, 1.0);
+            let mut a = Resampler::new(rate).unwrap();
+            let single = a.process(&audio);
+            for chunk in [1, 3, 64, 129, 2048, 32_768] {
+                let mut b = Resampler::new(rate).unwrap();
+                let mut chunked = Vec::new();
+                for c in audio.chunks(chunk) {
+                    chunked.extend_from_slice(&b.process(c));
+                }
+                assert_eq!(
+                    chunked.len(),
+                    single.len(),
+                    "rate={rate} chunk={chunk}: 输出长度不一致"
+                );
+                let first_diff = single
+                    .iter()
+                    .zip(chunked.iter())
+                    .position(|(x, y)| x.to_bits() != y.to_bits());
+                assert!(
+                    first_diff.is_none(),
+                    "rate={rate} chunk={chunk}: 首个差异在 {first_diff:?}（应逐位一致）"
+                );
+            }
+        }
+    }
+
     /// F6 (#87). Empty input is a no-op — returns an empty Vec and
     /// leaves the resampler state untouched. Plus: an empty call
     /// sandwiched between two non-empty calls doesn't perturb the output
@@ -505,18 +559,22 @@ mod tests {
         let mut b = Resampler::new(44_100).unwrap();
         let combined = b.process(&in_audio);
 
-        // Same length within 1, same per-sample values within tiny tolerance
-        // (the empty call shouldn't have moved the FIR's internal state).
-        assert!(
-            (sandwiched.len() as isize - combined.len() as isize).abs() <= 1,
-            "sandwiched.len()={} combined.len()={}",
+        // Same length and per-sample values, bit-exact (the empty call must
+        // not have moved the FIR's internal state).
+        assert_eq!(
+            sandwiched.len(),
+            combined.len(),
+            "sandwiched.len={} combined.len={}",
             sandwiched.len(),
             combined.len()
         );
-        let common = sandwiched.len().min(combined.len());
-        let max_diff = (0..common)
-            .map(|i| (sandwiched[i] - combined[i]).abs())
-            .fold(0.0_f32, f32::max);
-        assert!(max_diff < 1e-6, "max_diff={max_diff}");
+        let first_diff = sandwiched
+            .iter()
+            .zip(combined.iter())
+            .position(|(x, y)| x.to_bits() != y.to_bits());
+        assert!(
+            first_diff.is_none(),
+            "空调用不应扰动状态，首个差异在 {first_diff:?}"
+        );
     }
 }

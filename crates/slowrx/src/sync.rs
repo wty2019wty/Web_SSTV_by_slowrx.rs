@@ -541,7 +541,13 @@ const SPAN_LEN_LO: f64 = 0.5;
 const SPAN_LEN_HI: f64 = 1.8;
 
 /// 相邻候选续链的容差（单位：行）。小于 0.5 保证行号唯一。
-const MATCH_TOL_FRAMES: f64 = 0.45;
+///
+/// 取 0.25 而非更宽：双窗长外推后的候选抖动只有几个样本（≈0.001 行），
+/// 容差只需挡住测量抖动。此前的 0.45 会把噪声造出的伪候选（落在真实脉冲
+/// 后 0.6~1.4 行处）当成下一行续进链里，行号整体错一位，图像表现为行错位；
+/// 宁可断链（断链后实测点还能做全局拟合兜底，见 [`fit_model_starts`]）
+/// 也不允许错位续链。
+const MATCH_TOL_FRAMES: f64 = 0.25;
 
 /// 局部加权线性平滑的半径（单位：行）。窗口内近似线性的漂移被保留，
 /// 逐行随机抖动被压低约 `sqrt(2·HALO+1)` 倍。抖动主要来自双窗长外推的
@@ -657,6 +663,22 @@ pub(crate) fn track_line_starts(
         }
     }
 
+    // 噪声下相邻两次探测的漏检/误检可能把同一个同步脉冲劈成两段，产生
+    // 两个几乎同位置的候选；它们的间隔远小于一行，会把下面的续链判据
+    // （间隔 ≥1 行）打断。先把间隔不足半行的候选合并为一个（取中点）；
+    // 真实的同步脉冲至少隔一行，不受影响。
+    let mut merged: Vec<f64> = Vec::with_capacity(candidates.len());
+    for &c in &candidates {
+        if let Some(last) = merged.last_mut() {
+            if c - *last < line_samples * 0.5 {
+                *last = (*last + c) * 0.5;
+                continue;
+            }
+        }
+        merged.push(c);
+    }
+    let candidates = merged;
+
     // 没有任何可用同步段（例如 VIS 之后是静音/噪声）→ 直接退回全局等差模型。
     // 少了这一步，下面的 `best_chain` 仍会退化成 `Some((0, 1))`，随后
     // `candidates[start]` 会越界 panic（vis-then-silence 回归）。
@@ -708,14 +730,18 @@ pub(crate) fn track_line_starts(
         }
     }
 
-    // 3) 每帧取中值；实测太少说明行号分配不可靠 → 退回全局模型。
+    // 3) 每帧取中值；实测太少时行号分配不可靠，不能逐行用实测值，但
+    //    **斜率**（行周期）不受整数行号歧义影响——用实测点做一次全局线性
+    //    拟合来外推，代替粗略的等差模型（`find_sync` 的 Hough 0.5° 量化
+    //    加 90° 死区在短行模式上可达上百 ppm，正是噪声下图像倾斜的来源）。
+    //    拟合退化（点不足两个或跨度为零）时才保留原等差模型。
     let mut meas: Vec<Option<f64>> = Vec::with_capacity(n_frames);
     for v in &per_frame {
         meas.push(median(v));
     }
     let hits = meas.iter().filter(|m| m.is_some()).count();
     if hits * 3 < n_frames {
-        return fallback;
+        return fit_model_starts(&meas, &fallback);
     }
 
     // 4) 缺测行线性插值（两端沿用最近两个实测点的行间周期外推）。
@@ -782,6 +808,41 @@ pub(crate) fn track_line_starts(
         };
     }
     out
+}
+
+/// 实测点过少（不足总行数三分之一）时的回退模型：用实测点做一次全局
+/// 最小二乘线性拟合（截距 = 行 0 起点、斜率 = 实测行周期）来外推所有行，
+/// 而不是退回 [`find_sync`] 的粗略等差模型。
+///
+/// 链式行号可能整体偏移整数行，但**斜率**不受整数行号歧义影响，因此在
+/// 「行号不可靠」的前提下拟合仍然安全。拟合点不足两个、或它们全落在同一
+/// 行（跨度为零）时退化为 `fallback`（原等差模型）。
+#[allow(clippy::cast_precision_loss)]
+fn fit_model_starts(meas: &[Option<f64>], fallback: &[f64]) -> Vec<f64> {
+    let pts: Vec<(f64, f64)> = meas
+        .iter()
+        .enumerate()
+        .filter_map(|(n, m)| m.map(|v| (n as f64, v)))
+        .collect();
+    if pts.len() < 2 {
+        return fallback.to_vec();
+    }
+    let count = pts.len() as f64;
+    let mean_x = pts.iter().map(|&(x, _)| x).sum::<f64>() / count;
+    let mean_y = pts.iter().map(|&(_, y)| y).sum::<f64>() / count;
+    let (mut sxx, mut sxy) = (0.0, 0.0);
+    for &(x, y) in &pts {
+        sxx += (x - mean_x) * (x - mean_x);
+        sxy += (x - mean_x) * (y - mean_y);
+    }
+    if sxx <= f64::EPSILON {
+        return fallback.to_vec();
+    }
+    let slope = sxy / sxx;
+    let intercept = mean_y - slope * mean_x;
+    (0..fallback.len())
+        .map(|n| intercept + slope * (n as f64))
+        .collect()
 }
 
 /// 边沿精化用的 Hann 窗（两端为 0、中间为 1）。
@@ -1358,6 +1419,59 @@ mod tests {
             assert!(
                 (s - expected).abs() < 1e-6,
                 "行 {n}：退回值 {s} 应等于等差模型 {expected}"
+            );
+        }
+    }
+
+    /// 噪声回退路径：只有少数行能测到同步段（不足三分之一）时，不应整体
+    /// 退回 `find_sync` 的粗略等差模型（Hough 0.5° 量化 + 90° 死区在短行
+    /// 模式上可达上百 ppm，逐行表现为图像倾斜 / 行错位），而应用实测点
+    /// 拟合出的行周期外推。
+    #[test]
+    fn track_line_starts_fits_model_when_coverage_is_thin() {
+        let rate = f64::from(WORKING_SAMPLE_RATE_HZ);
+        let spec = modespec::for_mode(modespec::SstvMode::Pd240);
+        // 与 drift 测试相同：每行 +1 样本的时钟偏差（32 行累积 31 样本）。
+        let line_len = (spec.line_seconds * rate).round() as usize + 1;
+        let sync_len = (spec.sync_seconds * rate).round() as usize;
+        let porch_len = (spec.porch_seconds * rate).round() as usize;
+
+        let mut audio = Vec::new();
+        let mut true_starts = Vec::new();
+        for _ in 0..32 {
+            true_starts.push(audio.len() as f64);
+            push_tone(&mut audio, 1200.0, sync_len as f64 / rate, rate);
+            push_tone(&mut audio, 1500.0, porch_len as f64 / rate, rate);
+            let video = line_len - sync_len - porch_len;
+            push_tone(&mut audio, 1800.0, video as f64 / rate, rate);
+        }
+
+        // 只保留中间 9 行的同步段（9 < 32/3），模拟噪声下大面积漏检。
+        let mut has_sync = Vec::new();
+        for k in 0..(audio.len() / SYNC_PROBE_STRIDE) {
+            let center = k * SYNC_PROBE_STRIDE + SYNC_PROBE_STRIDE / 2;
+            let row = center / line_len;
+            has_sync.push((10..=18).contains(&row) && (center % line_len) < sync_len);
+        }
+
+        let starts = track_line_starts(
+            &has_sync,
+            &audio,
+            rate,
+            spec,
+            0,
+            rate,
+            true_starts.len() as u32,
+            0.0,
+        );
+        // 粗略等差模型在这 32 行上会累积 31 样本漂移；拟合模型的残余必须
+        // 远小于它（只剩拟合本身的误差）。
+        let offset = starts[0] - true_starts[0];
+        for (n, (&s, &t)) in starts.iter().zip(true_starts.iter()).enumerate() {
+            assert!(
+                ((s - offset) - t).abs() < 12.0,
+                "行 {n} 起点偏差 {:.2} 样本（等差模型会是 {n} 样本）",
+                (s - offset) - t
             );
         }
     }

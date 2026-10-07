@@ -521,6 +521,101 @@ mod tests {
         assert_eq!(image.pixels, batch_image.pixels, "渐进结果应与批处理一致");
     }
 
+    /// 加噪 + 时钟偏差下，渐进（实时）解码的收尾重解仍应与批处理逐像素一致。
+    ///
+    /// 覆盖 `progressive_streams_lines_and_matches_batch` 未触及的维度：
+    /// - Robot36 走跨行 `chroma_planes` 路径——收尾重解若被渐进预览留下的
+    ///   色度平面状态污染，会在这里暴露；
+    /// - 输入掺确定性噪声——渐进预览行与最终重解行不再相同，任何状态残留
+    ///   都会被放大成像素差；
+    /// - 解码器采样率与信号标称率有偏差（模拟设备时钟偏差）——强制走
+    ///   重采样 + `find_sync` 斜率修正路径。
+    #[test]
+    fn progressive_matches_batch_under_noise_and_rate_offset() {
+        assert_progressive_matches_batch(11_050, 0.02);
+    }
+
+    /// 分块粒度不应改变解码结果（实时 4096 块 vs 离线 32768 块 vs 整段
+    /// 一次性喂入，同一段音频必须逐像素一致）。
+    #[test]
+    fn progressive_matches_batch_with_resampler_active() {
+        assert_progressive_matches_batch(11_050, 0.0);
+    }
+
+    /// 直通（无重采样）+ 噪声下的等价性。
+    #[test]
+    fn progressive_matches_batch_with_noise_at_working_rate() {
+        assert_progressive_matches_batch(11_025, 0.02);
+    }
+
+    /// 合成 robot36 音频（可选掺噪）分别走批处理（整段一次喂入）与渐进
+    /// （小块喂入）路径，断言两张图逐像素一致。
+    fn assert_progressive_matches_batch(rate: u32, noise_amp: f32) {
+        use slowrx::SstvDecoder;
+
+        let audio = synth_test_audio("robot36", true).expect("合成音频");
+
+        // 确定性伪随机噪声（LCG），保证可复现。
+        let mut noisy = audio.clone();
+        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+        for s in &mut noisy {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let unit = (seed >> 40) as f32 / (1u64 << 24) as f32; // [0,1)
+            *s += (unit - 0.5) * 2.0 * noise_amp;
+        }
+
+        let mut batch = SstvDecoder::new(rate).expect("解码器");
+        let batch_image = batch
+            .process(&noisy)
+            .into_iter()
+            .find_map(|event| match event {
+                SstvEvent::ImageComplete { image, .. } => Some(image),
+                _ => None,
+            })
+            .expect("批处理应出图");
+
+        // 渐进解码：小块喂入（模拟实时推送的块粒度）。
+        let mut progressive = SstvDecoder::new(rate).expect("解码器");
+        progressive.set_progressive(true);
+        let mut progressive_image = None;
+        for chunk in noisy.chunks(2048) {
+            let events = progressive.process(chunk);
+            if progressive_image.is_none() {
+                progressive_image = events.into_iter().find_map(|event| match event {
+                    SstvEvent::ImageComplete { image, .. } => Some(image),
+                    _ => None,
+                });
+            }
+        }
+        let image = progressive_image.expect("渐进解码应出图");
+
+        // 结果不能是垃圾对垃圾的相等：图像应确实解出了内容。
+        let nonblack = image
+            .pixels
+            .iter()
+            .filter(|px| px[0] > 10 || px[1] > 10 || px[2] > 10)
+            .count();
+        assert!(
+            nonblack * 3 > image.pixels.len(),
+            "解码结果应以非黑像素为主（实际 {nonblack}/{}）",
+            image.pixels.len()
+        );
+
+        let diff = image
+            .pixels
+            .iter()
+            .zip(batch_image.pixels.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            diff, 0,
+            "rate={rate} noise={noise_amp}：渐进与批处理有 {diff}/{} 个像素不一致",
+            image.pixels.len()
+        );
+    }
+
     /// 收尾精修：只喂入部分音频后 `finalize`，应产出一张标记 `partial` 的图。
     #[test]
     fn finalize_produces_partial_image() {

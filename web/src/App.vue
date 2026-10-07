@@ -105,10 +105,12 @@ let liveStartedAt = 0
 /** 采集早于实时会话建立时暂存的音频块，会话建立后补投，避免丢掉开头。 */
 let livePendingChunks: Float32Array[] = []
 
-// 输入诊断：实际生效的音频约束 + 实时电平/削波，用于定位「实时比录音差」。
+// 输入诊断：实际生效的音频约束 + 实时电平/削波 + 时间基，用于定位「实时比录音差」。
 interface AudioSettings {
   device: string
   sampleRate: number
+  /** 麦克风轨道自身采样率（0 = 未知）；与 `sampleRate` 不等说明浏览器在重采样。 */
+  trackSampleRate: number
   channels: number
   echoCancellation: boolean
   noiseSuppression: boolean
@@ -120,14 +122,22 @@ interface LiveLevel {
   clipPct: number
   rangeDb: number
 }
+/** 实测输入速率（累计样本 / 墙钟），偏差大说明设备时钟不准或有丢块。 */
+interface LiveRate {
+  measured: number
+  ppm: number
+}
 const audioSettings = ref<AudioSettings | null>(null)
 const liveLevel = ref<LiveLevel | null>(null)
+const liveRate = ref<LiveRate | null>(null)
 let diagPeak = 0
 let diagSumSq = 0
 let diagCount = 0
 let diagClips = 0
 let diagChunks = 0
 let diagQuietDb = Number.POSITIVE_INFINITY
+let diagSamples = 0
+let diagStartAt = 0
 
 // 实时录音：停止后可一键用离线（文件）路径重解，得到权威结果。
 const RECORD_LIMIT_SECONDS = 300
@@ -158,6 +168,8 @@ function updateLevelDiag(samples: Float32Array) {
   diagCount += samples.length
   diagClips += clips
   diagChunks++
+  if (diagStartAt === 0) diagStartAt = performance.now()
+  diagSamples += samples.length
   if (diagChunks < 12 || diagCount === 0) return // 4096 帧/块 ≈ 12 块/秒
   const peakDb = 20 * Math.log10(Math.max(diagPeak, 1e-6))
   const rms = Math.sqrt(diagSumSq / diagCount)
@@ -168,6 +180,14 @@ function updateLevelDiag(samples: Float32Array) {
     rmsDb,
     clipPct: (diagClips / diagCount) * 100,
     rangeDb: peakDb - diagQuietDb,
+  }
+  // 实测输入速率 = 累计样本 / 墙钟；与标称速率的偏差（ppm）即时间基误差，
+  // 同时也会暴露采集链路的丢块（偏差显著为负）。
+  const nominal = capture.value?.sampleRate ?? 0
+  const elapsedSecs = (performance.now() - diagStartAt) / 1000
+  if (nominal > 0 && elapsedSecs > 0) {
+    const measured = diagSamples / elapsedSecs
+    liveRate.value = { measured, ppm: (measured / nominal - 1) * 1e6 }
   }
   diagPeak = 0
   diagSumSq = 0
@@ -427,7 +447,10 @@ async function startLiveReceive() {
   diagClips = 0
   diagChunks = 0
   diagQuietDb = Number.POSITIVE_INFINITY
+  diagSamples = 0
+  diagStartAt = 0
   liveLevel.value = null
+  liveRate.value = null
   audioSettings.value = null
   try {
     const cap = new LiveCapture()
@@ -447,6 +470,7 @@ async function startLiveReceive() {
     audioSettings.value = {
       device: cap.label() || '默认设备',
       sampleRate,
+      trackSampleRate: cap.trackRate,
       channels: settings?.channelCount ?? 1,
       echoCancellation: settings?.echoCancellation ?? false,
       noiseSuppression: settings?.noiseSuppression ?? false,
@@ -923,7 +947,30 @@ onBeforeUnmount(() => {
             </div>
             <div class="diag-row">
               <span>采样率 / 声道</span>
-              <span>{{ audioSettings.sampleRate }} Hz · {{ audioSettings.channels }} ch</span>
+              <span
+                :class="{
+                  warn:
+                    audioSettings.trackSampleRate > 0 &&
+                    audioSettings.trackSampleRate !== audioSettings.sampleRate,
+                }"
+              >
+                {{ audioSettings.sampleRate }} Hz · {{ audioSettings.channels }} ch
+                <template
+                  v-if="
+                    audioSettings.trackSampleRate > 0 &&
+                    audioSettings.trackSampleRate !== audioSettings.sampleRate
+                  "
+                >
+                  （轨道 {{ audioSettings.trackSampleRate }} Hz，浏览器重采样中）
+                </template>
+              </span>
+            </div>
+            <div v-if="liveRate" class="diag-row">
+              <span>时间基</span>
+              <span :class="{ warn: Math.abs(liveRate.ppm) > 500 }">
+                实测 {{ liveRate.measured.toFixed(1) }} Hz · 偏差
+                {{ (liveRate.ppm >= 0 ? '+' : '') + liveRate.ppm.toFixed(0) }} ppm
+              </span>
             </div>
             <div class="diag-row">
               <span>音频处理</span>
@@ -935,7 +982,14 @@ onBeforeUnmount(() => {
                     audioSettings.autoGainControl,
                 }"
               >
-                回声消除 {{ onOff(audioSettings.echoCancellation) }} · 降噪
+                <template
+                  v-if="
+                    audioSettings.echoCancellation ||
+                    audioSettings.noiseSuppression ||
+                    audioSettings.autoGainControl
+                  "
+                  >⚠ </template
+                >回声消除 {{ onOff(audioSettings.echoCancellation) }} · 降噪
                 {{ onOff(audioSettings.noiseSuppression) }} · 自动增益
                 {{ onOff(audioSettings.autoGainControl) }}
               </span>
@@ -951,7 +1005,10 @@ onBeforeUnmount(() => {
             <p class="hint">
               理想情况：音频处理全为「关」。若「自动增益」为开，说明浏览器/驱动覆盖了请求，
               会破坏 SSTV 的频率调制；若削波 &gt; 0 或峰值贴近 0 dBFS，请调低麦克风增益；
-              若峰值低于约 -30 dBFS，请调高。
+              若峰值低于约 -30 dBFS，请调高。时间基偏差（ppm）反映设备时钟与标称采样率的
+              差异：数百 ppm 以内可由同步斜率修正吸收，超过约 ±1000 ppm 或持续为负
+              （丢块）时图像会倾斜、行错位，建议在系统声音设置里把输入设备采样率固定为
+              与上表一致（如 48000 Hz）。
             </p>
           </div>
           <p v-else class="hint">开始接收后显示实际生效的音频约束与实时电平。</p>

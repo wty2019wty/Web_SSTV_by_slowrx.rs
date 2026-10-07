@@ -98,6 +98,25 @@ export function describeMicError(error: unknown): string {
   }
 }
 
+/**
+ * 创建音频上下文。
+ *
+ * 优先用 `preferredRate`（麦克风轨道的实际采样率）：两者不一致时 Chrome 会在
+ * MediaStream → Worklet 之间插入**实时自适应重采样器**，它会按缓冲水位丢样 /
+ * 重复样，给 SSTV 解码的时间基叠加非线性误差（表现为图像倾斜、行错位）。
+ * 该值不可用或浏览器不支持指定采样率时退回默认上下文。
+ */
+function createAudioContext(preferredRate: number): AudioContext {
+  if (Number.isFinite(preferredRate) && preferredRate > 0) {
+    try {
+      return new AudioContext({ sampleRate: preferredRate })
+    } catch {
+      /* 浏览器不支持指定采样率或该值不可用：退回默认上下文 */
+    }
+  }
+  return new AudioContext()
+}
+
 export class LiveCapture {
   private stream: MediaStream | null = null
   private context: AudioContext | null = null
@@ -105,8 +124,11 @@ export class LiveCapture {
   private node: AudioWorkletNode | null = null
   private sink: GainNode | null = null
   private track: MediaStreamTrack | null = null
-  /** 采集所用 AudioContext 的采样率（Hz）。 */
+  /** 采集所用 AudioContext 的采样率（Hz）——即回调音频块的实际采样率。 */
   sampleRate = 0
+  /** 麦克风轨道自身的采样率（Hz，未知为 0）；与 `sampleRate` 不等说明
+   *  浏览器在做重采样（诊断面板据此提示）。 */
+  trackRate = 0
   active = false
 
   /**
@@ -125,8 +147,12 @@ export class LiveCapture {
 
     const stream = await this.requestStream(options)
     const track = stream.getAudioTracks()[0] ?? null
+    // 以轨道实际采样率创建上下文，避开浏览器的实时重采样器（见
+    // `createAudioContext`）。
+    const trackRate = track?.getSettings().sampleRate ?? 0
+    this.trackRate = trackRate
 
-    const context = new AudioContext()
+    const context = createAudioContext(trackRate)
     // 尽早记录采样率：Worklet 可能在 `start()` 返回前就开始回传音频块。
     this.sampleRate = context.sampleRate
     try {
