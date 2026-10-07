@@ -1,11 +1,24 @@
 # Third-Party Notices
 
-`slowrx.rs` is a Rust port of [slowrx](https://github.com/windytan/slowrx),
-the SSTV decoder by Oona Räisänen (OH2EIQ). Significant portions of this
-crate's algorithms — VIS detection, mode-specification tables,
-frequency-to-pixel mappings, sync correlation — are translated from
-slowrx's C source code. Per-file headers in `src/` identify which
-modules are direct translations and credit the corresponding slowrx file.
+`crates/slowrx` is derived through the following chain:
+
+1. [windytan/slowrx](https://github.com/windytan/slowrx) — the original C
+   implementation by Oona Räisänen (OH2EIQ), under the **ISC** License;
+2. [jasonherald/slowrx.rs](https://github.com/jasonherald/slowrx.rs) — a pure-Rust
+   port built on 1, under the **MIT** License;
+3. [wty2019wty/slowrx.rs](https://github.com/wty2019wty/slowrx.rs/tree/sstv-web)
+   (the `sstv-web` branch) — a fork of 2, under the **MIT** License;
+4. [Web_SSTV_by_slowrx.rs](https://github.com/wty2019wty/Web_SSTV_by_slowrx.rs) —
+   this project, which inlines the decoder core from 3 as `crates/slowrx`, adds
+   progressive/real-time decoding, and wraps it in WebAssembly plus a web front
+   end. The project as a whole is under **AGPL-3.0-or-later**; the
+   `crates/slowrx` portion itself remains under MIT.
+
+VIS detection, mode-specification tables, frequency-to-pixel mappings, and sync
+correlation in this crate are translated from slowrx's C sources; per-file
+headers in `src/` identify the corresponding slowrx file. The ISC copyright and
+permission notice below is reproduced verbatim from upstream slowrx, as required
+by its distribution terms.
 
 ## slowrx — ISC License
 
@@ -25,14 +38,19 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-The ISC license is functionally equivalent to the 2-clause BSD and MIT
-licenses; redistributing the resulting Rust port under MIT preserves
-slowrx's permission terms while adding the standard MIT warranty
-disclaimer. The attribution and ISC permission notice above are
-preserved here in compliance with slowrx's distribution terms.
+The ISC License is functionally equivalent to the 2-clause BSD and MIT
+licenses. The upstream Rust port is released under MIT, which preserves
+slowrx's permission terms while adding the standard MIT warranty disclaimer.
+`crates/slowrx` itself continues to be distributed under **MIT** (see
+[`LICENSE`](./LICENSE)), while the rest of this project is under
+**AGPL-3.0-or-later** (see the repository root `LICENSE`). MIT/ISC and AGPL are
+compatible and may be combined and distributed together.
 
 ## Project links
 
-- slowrx repository: https://github.com/windytan/slowrx
+- Original C project: https://github.com/windytan/slowrx
+- Rust port: https://github.com/jasonherald/slowrx.rs
+- Inlined core source (`sstv-web` branch): https://github.com/wty2019wty/slowrx.rs/tree/sstv-web
+- This project: https://github.com/wty2019wty/Web_SSTV_by_slowrx.rs
 - slowrx project page: https://windytan.github.io/slowrx/
 - Author: Oona Räisänen (OH2EIQ), https://windytan.github.io/

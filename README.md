@@ -270,5 +270,5 @@ npm run bench
 
 | 组件 | 许可 | 说明 |
 |---|---|---|
-| `crates/slowrx` | **MIT**（保留） | 内联自 [jasonherald/slowrx.rs](https://github.com/jasonherald/slowrx.rs)，后者移植自 [windytan/slowrx](https://github.com/windytan/slowrx)（ISC）。见 `crates/slowrx/LICENSE` 与 `crates/slowrx/NOTICE.md`。 |
+| `crates/slowrx` | **MIT**（保留） | 来源链：[windytan/slowrx](https://github.com/windytan/slowrx)（ISC）→ [jasonherald/slowrx.rs](https://github.com/jasonherald/slowrx.rs)（MIT）→ [wty2019wty/slowrx.rs `sstv-web` 分支](https://github.com/wty2019wty/slowrx.rs/tree/sstv-web)。本仓库内联自该分支。见 `crates/slowrx/LICENSE` 与 `crates/slowrx/NOTICE.md`。 |
 
