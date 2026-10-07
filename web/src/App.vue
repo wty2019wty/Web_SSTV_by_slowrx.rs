@@ -870,6 +870,12 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else>
+        <p class="notice-warn" role="note">
+          <strong>⚠ 实验功能 · 开发测试阶段</strong
+          >：麦克风实时解码的效果还不理想（同步、识模、抗噪仍在调优），
+          出图可能错位、缺行、串色甚至整段解不出来。
+          需要可靠结果时，请用「📁 本地文件」走离线解码。
+        </p>
         <div class="row">
           <label v-if="audioInputs.length > 0">
             输入设备
@@ -1062,6 +1068,17 @@ onBeforeUnmount(() => {
         <li v-for="(line, index) in log" :key="index">{{ line }}</li>
       </ul>
     </section>
+
+    <div id="footer">
+      <a class="footerlink" href="https://github.com/wty2019wty/Web_SSTV_by_slowrx.rs/" target="_blank" rel="noopener">
+        <svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><g transform="translate(-84, -7399)"><path d="M94,7399 C99.523,7399 104,7403.59 104,7409.253 C104,7413.782 101.138,7417.624 97.167,7418.981 C96.66,7419.082 96.48,7418.762 96.48,7418.489 C96.48,7418.151 96.492,7417.047 96.492,7415.675 C96.492,7414.719 96.172,7414.095 95.813,7413.777 C98.04,7413.523 100.38,7412.656 100.38,7408.718 C100.38,7407.598 99.992,7406.684 99.35,7405.966 C99.454,7405.707 99.797,7404.664 99.252,7403.252 C99.252,7403.252 98.414,7402.977 96.505,7404.303 C95.706,7404.076 94.85,7403.962 94,7403.958 C93.15,7403.962 92.295,7404.076 91.497,7404.303 C89.586,7402.977 88.746,7403.252 88.746,7403.252 C88.203,7404.664 88.546,7405.707 88.649,7405.966 C88.01,7406.684 87.619,7407.598 87.619,7408.718 C87.619,7412.646 89.954,7413.526 92.175,7413.785 C91.889,7414.041 91.63,7414.493 91.54,7415.156 C90.97,7415.418 89.522,7415.871 88.63,7414.304 C88.63,7414.304 88.101,7413.319 87.097,7413.247 C87.097,7413.247 86.122,7413.234 87.029,7413.87 C87.029,7413.87 87.684,7414.185 88.139,7415.37 C88.139,7415.37 88.726,7417.2 91.508,7416.58 C91.513,7417.437 91.522,7418.245 91.522,7418.489 C91.522,7418.76 91.338,7419.077 90.839,7418.982 C86.865,7417.627 84,7413.783 84,7409.253 C84,7403.59 88.478,7399 94,7399"/></g></svg>
+        GitHub 项目地址：Web_SSTV_by_slowrx.rs
+      </a>
+
+      <a class="footerlink" href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener">
+        开源协议：GPL-3.0
+      </a>
+    </div>
   </main>
 </template>
 
@@ -1222,6 +1239,21 @@ button:disabled {
 .warn {
   color: #f0b34a;
 }
+/* 麦克风实时解码的显眼实验性标注条（与 .hint.warn 区分，避免被探针脚本误当成环境警告）。 */
+.notice-warn {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid #6b4a12;
+  border-left: 3px solid #f0b34a;
+  border-radius: 6px;
+  background: #2a2213;
+  color: #ffd166;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+.notice-warn strong {
+  color: #ffe08a;
+}
 /* 不完整图标记。 */
 .badge {
   margin-left: 0.35rem;
@@ -1231,6 +1263,10 @@ button:disabled {
   color: #ffd166;
   font-size: 0.7rem;
   font-style: normal;
+}
+/* 标签页里的「开发测试」小标注：去掉按钮内的额外外边距。 */
+.source-tabs .badge {
+  margin-left: 0.3rem;
 }
 .progress {
   height: 6px;
@@ -1281,6 +1317,32 @@ button:disabled {
   font-size: 0.82rem;
   max-height: 200px;
   overflow: auto;
+}
+
+/* --- 页脚 ---------------------------------------------------------------- */
+#footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem 1.5rem;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2c3038;
+  font-size: 0.85rem;
+}
+.footerlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: #4f9cf9;
+  text-decoration: none;
+}
+.footerlink:hover {
+  text-decoration: underline;
+}
+.footerlink svg {
+  flex: none;
 }
 
 /* --- 移动端 / 窄屏适配 ------------------------------------------------ */
