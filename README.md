@@ -1,9 +1,21 @@
 # Web 端 SSTV 解码工具
 
-在浏览器中运行的 SSTV（慢扫描电视）解码工具。解码核心复用 [`slowrx`](https://github.com/wty2019wty/slowrx.rs/tree/sstv-web)
-（Rust 库），编译为 WebAssembly 在**本地**运行；音频不上传任何服务器。
 
-配套方案文档见 `slowrx` 仓库 `sstv-web` 分支的 `docs/`（本仓库不复制）。
+## 关于 Web_SSTV_by_slowrx.rs
+
+Web_SSTV_by_slowrx.rs 是知名开源SSTV解码器 slowrx 的Web移植项目。
+项目将纯Rust实现的 [`wty2019wty/slowrx.rs/tree/sstv-web`](https://github.com/wty2019wty/slowrx.rs/tree/sstv-web) 解码核心编译为WebAssembly，结合Web Audio API，在浏览器中完成SSTV慢扫描电视信号处理。
+
+✨ 主要特性
+- 🔒 **完全客户端运算**：数字信号处理与图像解码全部在浏览器本地完成，不会向服务器上传任何音频、图像数据。
+- 📁 本地音频文件解码：支持导入本地WAV录音文件，离线解析SSTV图片。
+- 📡 继承slowrx核心能力：VIS模式自动识别、频偏跟踪、自动图像倾斜校正、噪声抑制，适配业余无线电SSTV信号。
+- 🖼️ Canvas渲染解码图像，接收完成后可直接下载解码后的图片。
+
+面向短波收听者(SWL)、业余无线电HAM、SSTV信号研究人员。
+
+
+
 
 ---
 ## 预览图片
