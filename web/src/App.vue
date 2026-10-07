@@ -870,6 +870,12 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-else>
+        <p class="notice-warn" role="note">
+          <strong>⚠ 实验功能 · 开发测试阶段</strong
+          >：麦克风实时解码的效果还不理想（同步、识模、抗噪仍在调优），
+          出图可能错位、缺行、串色甚至整段解不出来。
+          需要可靠结果时，请用「📁 本地文件」走离线解码。
+        </p>
         <div class="row">
           <label v-if="audioInputs.length > 0">
             输入设备
@@ -1233,6 +1239,21 @@ button:disabled {
 .warn {
   color: #f0b34a;
 }
+/* 麦克风实时解码的显眼实验性标注条（与 .hint.warn 区分，避免被探针脚本误当成环境警告）。 */
+.notice-warn {
+  margin: 0.5rem 0 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid #6b4a12;
+  border-left: 3px solid #f0b34a;
+  border-radius: 6px;
+  background: #2a2213;
+  color: #ffd166;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+.notice-warn strong {
+  color: #ffe08a;
+}
 /* 不完整图标记。 */
 .badge {
   margin-left: 0.35rem;
@@ -1242,6 +1263,10 @@ button:disabled {
   color: #ffd166;
   font-size: 0.7rem;
   font-style: normal;
+}
+/* 标签页里的「开发测试」小标注：去掉按钮内的额外外边距。 */
+.source-tabs .badge {
+  margin-left: 0.3rem;
 }
 .progress {
   height: 6px;
