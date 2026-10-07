@@ -126,6 +126,8 @@ interface LiveLevel {
 interface LiveRate {
   measured: number
   ppm: number
+  /** 平均窗口时长（秒），太短时到达抖动本身就有上千 ppm。 */
+  secs: number
 }
 const audioSettings = ref<AudioSettings | null>(null)
 const liveLevel = ref<LiveLevel | null>(null)
@@ -168,8 +170,14 @@ function updateLevelDiag(samples: Float32Array) {
   diagCount += samples.length
   diagClips += clips
   diagChunks++
-  if (diagStartAt === 0) diagStartAt = performance.now()
-  diagSamples += samples.length
+  if (diagStartAt === 0) {
+    // 首块只建时间基线：这块样本是到达**之前**约一个块时长（4096 帧 ≈
+    // 85 ms @48 kHz）里积累的，若一并计入会让实测速率固定虚高
+    // 「块时长 ÷ 已接收时长」（39 s 会话约 +2185 ppm 的假偏差）。
+    diagStartAt = performance.now()
+  } else {
+    diagSamples += samples.length
+  }
   if (diagChunks < 12 || diagCount === 0) return // 4096 帧/块 ≈ 12 块/秒
   const peakDb = 20 * Math.log10(Math.max(diagPeak, 1e-6))
   const rms = Math.sqrt(diagSumSq / diagCount)
@@ -182,12 +190,13 @@ function updateLevelDiag(samples: Float32Array) {
     rangeDb: peakDb - diagQuietDb,
   }
   // 实测输入速率 = 累计样本 / 墙钟；与标称速率的偏差（ppm）即时间基误差，
-  // 同时也会暴露采集链路的丢块（偏差显著为负）。
+  // 同时也会暴露采集链路的丢块（偏差显著为负）。窗口太短时消息到达的
+  // 抖动本身就有上千 ppm，积累 5 s 以上再显示。
   const nominal = capture.value?.sampleRate ?? 0
   const elapsedSecs = (performance.now() - diagStartAt) / 1000
-  if (nominal > 0 && elapsedSecs > 0) {
+  if (nominal > 0 && elapsedSecs >= 5) {
     const measured = diagSamples / elapsedSecs
-    liveRate.value = { measured, ppm: (measured / nominal - 1) * 1e6 }
+    liveRate.value = { measured, ppm: (measured / nominal - 1) * 1e6, secs: elapsedSecs }
   }
   diagPeak = 0
   diagSumSq = 0
@@ -970,6 +979,7 @@ onBeforeUnmount(() => {
               <span :class="{ warn: Math.abs(liveRate.ppm) > 500 }">
                 实测 {{ liveRate.measured.toFixed(1) }} Hz · 偏差
                 {{ (liveRate.ppm >= 0 ? '+' : '') + liveRate.ppm.toFixed(0) }} ppm
+                （近 {{ liveRate.secs.toFixed(0) }}s 平均）
               </span>
             </div>
             <div class="diag-row">
