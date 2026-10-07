@@ -1075,8 +1075,8 @@ onBeforeUnmount(() => {
         GitHub 项目地址：Web_SSTV_by_slowrx.rs
       </a>
 
-      <a class="footerlink" href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener">
-        开源协议：GPL-3.0
+      <a class="footerlink" href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">
+        开源协议：AGPL-3.0
       </a>
     </div>
   </main>

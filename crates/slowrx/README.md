@@ -153,6 +153,12 @@ project. The SSTV community owes a real debt to Oona's work.
 
 Released under the [MIT License](./LICENSE).
 
+Full provenance chain:
+[windytan/slowrx](https://github.com/windytan/slowrx) (ISC)
+→ [jasonherald/slowrx.rs](https://github.com/jasonherald/slowrx.rs) (MIT)
+→ [wty2019wty/slowrx.rs `sstv-web` branch](https://github.com/wty2019wty/slowrx.rs/tree/sstv-web) (MIT)
+→ this project [Web_SSTV_by_slowrx.rs](https://github.com/wty2019wty/Web_SSTV_by_slowrx.rs).
+
 slowrx is distributed under the ISC License. The MIT/ISC pairing is
 intentional — see [NOTICE.md](./NOTICE.md) for the full attribution and
 license preservation notice.

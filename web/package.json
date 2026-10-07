@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Web 端 SSTV 解码工具前端（Vite + Vue 3）",
+  "license": "AGPL-3.0-or-later",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",

@@ -259,3 +259,16 @@ npm run bench
   解码路径重解，得到同源的权威结果（也便于用同一段音频对比实时与离线）。
 - 停止收尾：`SstvDecoder::finalize()` 用已收集的完整 sync 重解已到齐的行，产出一张
   `partial: true` 的图（UI 标记「未完整」），避免中途停止只剩未经精修的预览。
+
+## 许可证
+
+本项目（前端、`slowrx-wasm` 包装 crate、构建脚本等自身代码）以
+**GNU Affero General Public License v3.0 or later（AGPL-3.0-or-later）** 授权，
+全文见仓库根目录 [`LICENSE`](./LICENSE)。
+
+第三方归属与许可保留：
+
+| 组件 | 许可 | 说明 |
+|---|---|---|
+| `crates/slowrx` | **MIT**（保留） | 来源链：[windytan/slowrx](https://github.com/windytan/slowrx)（ISC）→ [jasonherald/slowrx.rs](https://github.com/jasonherald/slowrx.rs)（MIT）→ [wty2019wty/slowrx.rs `sstv-web` 分支](https://github.com/wty2019wty/slowrx.rs/tree/sstv-web)。本仓库内联自该分支。见 `crates/slowrx/LICENSE` 与 `crates/slowrx/NOTICE.md`。 |
+

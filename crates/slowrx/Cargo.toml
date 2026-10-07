@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.85"
 description = "Pure-Rust SSTV (Slow-Scan TV) decoder library — a port of slowrx by Oona Räisänen"
 authors = ["Jason Herald <jason.herald@gmail.com>"]
+# This crate is the inlined upstream Rust port (slowrx.rs, MIT); its upstream
+# license and attribution are preserved. The rest of this project is
+# AGPL-3.0-or-later — see the repository root LICENSE and NOTICE.md.
 license = "MIT"
 repository = "https://github.com/jasonherald/slowrx.rs"
 homepage = "https://github.com/jasonherald/slowrx.rs"
